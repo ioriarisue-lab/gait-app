@@ -2,7 +2,7 @@ import { PoseLandmarker } from "./vision_bundle.mjs";
 import { Muxer, ArrayBufferTarget } from "./mp4-muxer.mjs";
 import * as G from "./gait.js";
 
-const APP_VERSION = "1.6.0";
+const APP_VERSION = "1.6.1";
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 

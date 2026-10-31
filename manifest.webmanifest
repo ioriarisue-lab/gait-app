@@ -1,6 +1,8 @@
 {
+  "id": "./",
   "name": "歩行角度解析",
   "short_name": "歩行角度",
+  "description": "歩行動画から膝・股関節の角度を推定するオフラインアプリ",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
@@ -8,7 +10,8 @@
   "background_color": "#f4f6f5",
   "theme_color": "#165e54",
   "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }
