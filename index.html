@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="歩行角度">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#165e54">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<title>歩行角度解析</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>歩行角度解析 <span id="netBadge" class="badge">オフライン対応</span></h1>
+  <nav>
+    <button data-tab="record" class="tab active">撮影</button>
+    <button data-tab="library" class="tab">動画</button>
+    <button data-tab="results" class="tab">結果</button>
+    <button data-tab="settings" class="tab">設定</button>
+  </nav>
+</header>
+
+<main>
+  <!-- 撮影 -->
+  <section id="tab-record" class="panel active">
+    <div class="camwrap">
+      <video id="preview" playsinline muted autoplay></video>
+      <div id="recTimer" class="rectimer hidden">● 00:00</div>
+      <div id="camMsg" class="cammsg">「カメラ起動」を押してください</div>
+    </div>
+    <div class="row">
+      <label>解像度
+        <select id="resSel"><option value="1080">1080p</option><option value="720">720p</option></select>
+      </label>
+      <label>フレームレート
+        <select id="fpsSel"><option>30</option><option>60</option></select>
+      </label>
+      <label>カメラ
+        <select id="facingSel"><option value="environment">背面</option><option value="user">前面</option></select>
+      </label>
+    </div>
+    <p id="orientWarn" class="warn hidden">縦向きで撮影しています。歩行は横向き（ランドスケープ）で撮ると全身と歩行区間を広く撮れます。</p>
+    <div class="row recbar">
+      <button id="camBtn" class="btn">カメラ起動</button>
+      <button id="recBtn" class="btn rec" disabled>録画開始</button>
+    </div>
+    <p class="hint">iPhone・iPadを横向きに固定し、歩行者の全身と足先が画面に入る真横から撮影してください。前後に歩行区間を含めると周期を検出しやすくなります。</p>
+  </section>
+
+  <!-- 動画一覧 -->
+  <section id="tab-library" class="panel">
+    <div class="row">
+      <label class="btn sub">写真・ファイルから読み込む<input id="importVideo" type="file" accept="video/*" hidden></label>
+    </div>
+    <ul id="videoList" class="list"></ul>
+  </section>
+
+  <!-- 結果 -->
+  <section id="tab-results" class="panel">
+    <div id="resultView" class="hidden"></div>
+    <ul id="resultList" class="list"></ul>
+  </section>
+
+  <!-- 設定 -->
+  <section id="tab-settings" class="panel">
+    <h2>姿勢推定モデル</h2>
+    <p id="modelStatus">確認中…</p>
+    <label class="btn sub">モデル(.task)を取り込む<input id="importModel" type="file" accept=".task,application/octet-stream" hidden></label>
+    <p class="hint">pose_landmarker_heavy.task（Python版で使っているもの）を一度取り込めば端末内に保存され、以後はネットなしで使えます。</p>
+    <h2>保存容量</h2>
+    <p id="storageInfo">-</p>
+    <h2>このアプリについて</h2>
+    <p class="hint">動画・解析結果はすべてこの端末内（アプリのストレージ）に保存され、外部へ送信されません。CSV・Excel・グラフ・スティックピクチャー動画は「保存/共有」から「ファイル」や「写真」へ書き出せます。<br>横からの単眼動画による2D推定であり、臨床測定・診断には使用できません。</p>
+    <p class="hint" id="verInfo"></p>
+  </section>
+</main>
+
+<!-- 解析ダイアログ -->
+<div id="analyzeDlg" class="modal hidden">
+  <div class="sheet">
+    <h2>解析設定</h2>
+    <p id="anaName" class="mono"></p>
+    <video id="anaPreview" playsinline muted controls></video>
+    <div class="row">
+      <span>画面上の進行方向</span>
+      <div class="seg">
+        <button data-dir="1" class="active">右へ →</button>
+        <button data-dir="-1">← 左へ</button>
+      </div>
+    </div>
+    <div class="row">
+      <label>フレームレート(fps)
+        <input id="anaFps" type="number" min="1" max="240" step="0.01" value="30">
+      </label>
+      <label class="chk"><input id="anaStick" type="checkbox" checked> スティックピクチャー動画も作る</label>
+    </div>
+    <div id="anaProgress" class="hidden">
+      <progress id="anaBar" max="1" value="0"></progress>
+      <p id="anaText" class="mono"></p>
+    </div>
+    <div class="row end">
+      <button id="anaCancel" class="btn sub">閉じる</button>
+      <button id="anaStart" class="btn">解析開始</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="xlsx.mini.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
