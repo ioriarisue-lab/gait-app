@@ -72,6 +72,8 @@
     <p id="modelStatus">確認中…</p>
     <label class="btn sub">モデル(.task)を取り込む<input id="importModel" type="file" accept=".task,application/octet-stream" hidden></label>
     <p class="hint">pose_landmarker_heavy.task（Python版で使っているもの）を一度取り込めば端末内に保存され、以後はネットなしで使えます。</p>
+    <button id="splitModel" class="btn sub">モデルを2分割して書き出す</button>
+    <p class="hint">GitHubにスマホから上げる用です。書き出した .part1 と .part2 の2つを、アプリのファイルと同じ場所にアップロードすると、ほかの人の端末でも自動で読み込まれます。</p>
     <h2>保存容量</h2>
     <p id="storageInfo">-</p>
     <h2>このアプリについて</h2>

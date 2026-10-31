@@ -2,7 +2,7 @@ import { PoseLandmarker } from "./vision_bundle.mjs";
 import { Muxer, ArrayBufferTarget } from "./mp4-muxer.mjs";
 import * as G from "./gait.js";
 
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.2.0";
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -233,13 +233,23 @@ async function getModel() {
   if (modelBytes) return modelBytes;
   const saved = await dbGet("kv", "model");
   if (saved) return (modelBytes = new Uint8Array(saved.buffer));
-  try { // リポジトリの models/ に置いた場合
-    const r = await fetch("models/pose_landmarker_heavy.task");
-    if (r.ok) {
-      const buf = await r.arrayBuffer();
-      if (buf.byteLength > 1e6) { await dbPut("kv", { name: "pose_landmarker_heavy.task", buffer: buf, size: buf.byteLength }, "model"); return (modelBytes = new Uint8Array(buf)); }
-    }
-  } catch {}
+  // アプリと同じ場所にモデルを置いた場合は自動で取り込む（heavy優先）
+  // 2分割したもの（.part1/.part2）にも対応
+  for (const name of ["pose_landmarker_heavy.task", "pose_landmarker_full.task", "models/pose_landmarker_heavy.task"]) {
+    try {
+      let buf = null;
+      const r = await fetch(name, { cache: "no-store" });
+      if (r.ok) buf = await r.arrayBuffer();
+      else {
+        const [a, b] = await Promise.all([1, 2].map((i) => fetch(`${name}.part${i}`, { cache: "no-store" })));
+        if (!a.ok || !b.ok) continue;
+        const [x, y] = await Promise.all([a.arrayBuffer(), b.arrayBuffer()]);
+        const u = new Uint8Array(x.byteLength + y.byteLength); u.set(new Uint8Array(x), 0); u.set(new Uint8Array(y), x.byteLength);
+        buf = u.buffer;
+      }
+      if (buf && buf.byteLength > 1e6) { await dbPut("kv", { name: name.split("/").pop(), buffer: buf, size: buf.byteLength }, "model"); return (modelBytes = new Uint8Array(buf)); }
+    } catch {}
+  }
   return null;
 }
 $("#importModel").onchange = async (e) => {
@@ -250,6 +260,15 @@ $("#importModel").onchange = async (e) => {
   await dbPut("kv", { name: f.name, buffer: buf, size: buf.byteLength }, "model");
   modelBytes = new Uint8Array(buf);
   toast("モデルを端末内に保存しました"); renderSettings(); updBadge();
+};
+$("#splitModel").onclick = async () => {
+  const m = await dbGet("kv", "model");
+  if (!m) { toast("先にモデルを取り込んでください"); return; }
+  const half = Math.ceil(m.buffer.byteLength / 2);
+  // 取り込んだファイル名が変わっていても、自動読み込みで探す名前にそろえる
+  const base = /full/i.test(m.name) ? "pose_landmarker_full.task" : "pose_landmarker_heavy.task";
+  const files = [1, 2].map((i) => new File([m.buffer.slice((i - 1) * half, i * half)], `${base}.part${i}`, { type: "application/octet-stream" }));
+  await saveFiles(files);
 };
 async function renderSettings() {
   const m = await dbGet("kv", "model");
