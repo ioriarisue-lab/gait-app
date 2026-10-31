@@ -1,8 +1,9 @@
 import { PoseLandmarker } from "./vision_bundle.mjs";
 import { Muxer, ArrayBufferTarget } from "./mp4-muxer.mjs";
 import * as G from "./gait.js";
+import { RTMPoseEstimator } from "./rtm.js";
 
-const APP_VERSION = "1.6.1";
+const APP_VERSION = "1.7.0";
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -385,9 +386,63 @@ async function renderSettings() {
     $("#storageInfo").textContent = `使用 ${fmtSize(e.usage || 0)} / 上限目安 ${fmtSize(e.quota || 0)}${p ? "（消去されにくい保存）" : ""}`;
   }
   $("#verInfo").textContent = `バージョン ${APP_VERSION}`;
+  for (const k of ["rtm_det", "rtm_pose"]) {
+    const m = await dbGet("kv", k);
+    $(`#${k}Status`).innerHTML = m ? `保存済み: <b>${esc(m.name)}</b>（${fmtSize(m.size)}）` : "未設定";
+  }
+  $("#rtmPref").value = lsGet("rtm_pref", "auto");
 }
-async function createLandmarker() {
+for (const k of ["rtm_det", "rtm_pose"]) {
+  $(`#${k}Import`).onchange = async (e) => {
+    const f = e.target.files[0]; e.target.value = "";
+    if (!f) return;
+    const buf = await f.arrayBuffer();
+    if (buf.byteLength < 1e5) { toast("ONNXモデルではないようです"); return; }
+    await dbPut("kv", { name: f.name, buffer: buf, size: buf.byteLength }, k);
+    toast("モデルを端末内に保存しました"); renderSettings();
+  };
+  $(`#${k}Split`).onclick = async () => {
+    const m = await dbGet("kv", k);
+    if (!m) { toast("先にモデルを取り込んでください"); return; }
+    const size = 24 * 1024 * 1024, n = Math.ceil(m.buffer.byteLength / size);
+    const files = Array.from({ length: n }, (_, i) => new File([m.buffer.slice(i * size, (i + 1) * size)], `${RTM_FILES[k]}.part${i + 1}`, { type: "application/octet-stream" }));
+    await saveFiles(files);
+  };
+  $(`#${k}Del`).onclick = async () => { if (confirm("このモデルを端末から削除しますか？")) { await dbDel("kv", k); renderSettings(); } };
+}
+$("#rtmPref").onchange = (e) => lsSet("rtm_pref", e.target.value);
+const RTM_FILES = { rtm_det: "rtm_det.onnx", rtm_pose: "rtm_pose.onnx" };
+const lsGet = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+// 分割ファイル（.part1, .part2, …）にも対応して取得
+async function fetchWithParts(name) {
+  try {
+    const r = await fetch(name, { cache: "no-store" });
+    if (r.ok) return await r.arrayBuffer();
+  } catch {}
+  const parts = [];
+  for (let i = 1; i <= 12; i++) {
+    try { const r = await fetch(`${name}.part${i}`, { cache: "no-store" }); if (!r.ok) break; parts.push(new Uint8Array(await r.arrayBuffer())); } catch { break; }
+  }
+  if (!parts.length) return null;
+  const u = new Uint8Array(parts.reduce((t, p) => t + p.length, 0));
+  let o = 0; for (const p of parts) { u.set(p, o); o += p.length; }
+  return u.buffer;
+}
+async function getRtmModel(key) {
+  const saved = await dbGet("kv", key);
+  if (saved) return new Uint8Array(saved.buffer);
+  const buf = await fetchWithParts(RTM_FILES[key]);
+  if (buf && buf.byteLength > 1e5) { await dbPut("kv", { name: RTM_FILES[key], buffer: buf, size: buf.byteLength }, key); return new Uint8Array(buf); }
+  return null;
+}
+async function createLandmarker(engine = "mediapipe") {
   if (window.__mockLm) return window.__mockLm(); // テスト用
+  if (engine === "rtmpose") {
+    const [det, pose] = await Promise.all([getRtmModel("rtm_det"), getRtmModel("rtm_pose")]);
+    if (!det || !pose) throw new Error("RTMPoseのモデルが未設定です。「設定」タブで人物検出モデルと姿勢推定モデル（.onnx）を取り込んでください。");
+    return await RTMPoseEstimator.create(det, pose, lsGet("rtm_pref", "auto"));
+  }
   const bytes = await getModel();
   if (!bytes) throw new Error("姿勢推定モデルが未設定です。「設定」タブで pose_landmarker_heavy.task を取り込んでください。");
   const fileset = {
@@ -404,6 +459,14 @@ async function createLandmarker() {
 }
 
 // ---------- 解析ダイアログ ----------
+let anaEngine = lsGet("engine", "mediapipe");
+$$("#engSeg button").forEach((b) => {
+  b.classList.toggle("active", b.dataset.eng === anaEngine);
+  b.addEventListener("click", () => {
+    anaEngine = b.dataset.eng; lsSet("engine", anaEngine);
+    $$("#engSeg button").forEach((x) => x.classList.toggle("active", x === b));
+  });
+});
 let anaRec = null, anaMode = "r", anaRef = "right", cancelFlag = false, running = false;
 $$("#refSeg button").forEach((b) => b.addEventListener("click", () => {
   anaRef = b.dataset.ref;
@@ -458,7 +521,7 @@ $("#anaStart").onclick = async () => {
   $("#anaProgress").classList.remove("hidden");
   keepAwake(true);
   try {
-    const result = await analyze(anaRec, MODES[anaMode], fps, $("#anaStick").checked, { perCycle: $("#anaPerCycle").checked, refSide: anaRef }, (i, n, msg) => {
+    const result = await analyze(anaRec, MODES[anaMode], fps, $("#anaStick").checked, { perCycle: $("#anaPerCycle").checked, refSide: anaRef, engine: anaEngine }, (i, n, msg) => {
       $("#anaBar").value = n ? i / n : 0;
       $("#anaText").textContent = msg || `${i} / ${n} フレーム`;
     });
@@ -470,7 +533,7 @@ $("#anaStart").onclick = async () => {
     running = false;
     $("#anaText").textContent = e.message === "cancel" ? "中止しました" : "エラー: " + e.message;
     $("#anaStart").disabled = false; $("#anaCancel").textContent = "閉じる";
-  } finally { keepAwake(false); }
+  } finally { keepAwake(false); G.setEngine("mediapipe"); }
 };
 
 // ---------- 解析本体 ----------
@@ -524,7 +587,10 @@ async function setupEncoder(W, H, fps) {
 async function analyze(rec, mode, fps, makeStick, opts, progress) {
   const [direction, dir2] = mode;
   progress(0, 0, "モデルを準備中…");
-  const landmarker = await createLandmarker();
+  const engine = opts.engine || "mediapipe";
+  G.setEngine(engine);
+  const landmarker = await createLandmarker(engine);
+  const backendName = landmarker.backend || "";
   const v = await loadVideoEl(rec.blob, true);
   try { await v.play(); v.pause(); } catch {}
   const W = v.videoWidth, H = v.videoHeight, duration = v.duration;
@@ -541,7 +607,7 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
       await seekTo(v, Math.min((i + 0.5) / fps, Math.max(0, duration - 0.001)));
       ctx.drawImage(v, 0, 0, W, H);
       const ts = Math.round((i * 1000) / fps);
-      const res = landmarker.detectForVideo(canvas, ts);
+      const res = await landmarker.detectForVideo(canvas, ts);
       const pose = G.chooseLeadingPose(res.landmarks || [], W, H, tracker.dir);
       tracker.update(i, pose, W, H);
       rows.push(G.buildRow(i, fps, ts, W, H, pose));
@@ -575,7 +641,7 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
   }
   if (makeStick && !enc) warning += (warning ? "\n" : "") + "この端末ではスティックピクチャー動画を作成できませんでした（iOS / iPadOS 16.4以降が必要）。";
 
-  const base = rec.name.replace(/\.[^.]+$/, "") + "_gait_angles";
+  const base = rec.name.replace(/\.[^.]+$/, "") + (engine === "rtmpose" ? "_rtmpose" : "") + "_gait_angles";
   const cols = G.exportColumns();
   if (rt) cols.splice(5, 0, "segment");
   const csv = new Blob(["﻿" + toCSV(cols, rows)], { type: "text/csv" });
@@ -595,7 +661,7 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
   }
   const detected = rows.filter((r) => r.left_knee_flexion_deg != null || r.right_knee_flexion_deg != null).length;
   return {
-    id: uid(), videoId: rec.id, videoName: rec.name, base, created: Date.now(), direction, dir2, fps,
+    id: uid(), videoId: rec.id, videoName: rec.name, base, created: Date.now(), direction, dir2, fps, engine, backendName,
     roundTrip: rt ? { turnFrame: rt.turnFrame, turnStart: rt.turnStart, turnEnd: rt.turnEnd } : null,
     frames: rows.length, width: W, height: H, detected, cycleSide, nCycles: events.length, events, warning,
     csv, xlsx, png, stick, perCycle,
@@ -723,7 +789,7 @@ async function renderResults() {
   ul.innerHTML = list.map((r) => `
     <li data-id="${r.id}">
       <div class="meta"><b>${esc(r.base)}</b>
-        <span>${fmtDate(r.created)} ・ ${r.frames}フレーム ・ ${r.nCycles}周期${r.warning ? " ・ ⚠" : ""}</span></div>
+        <span>${r.engine === "rtmpose" ? "RTMPose ・ " : ""}${fmtDate(r.created)} ・ ${r.frames}フレーム ・ ${r.nCycles}周期${r.warning ? " ・ ⚠" : ""}</span></div>
       <div class="acts">
         <button class="btn small" data-act="open">表示</button>
         <button class="btn small sub" data-act="delete">削除</button>
@@ -750,6 +816,7 @@ async function openResult(id) {
     ${r.warning ? `<p class="warn">${esc(r.warning).replace(/\n/g, "<br>")}</p>` : ""}
     <table class="sum">
       <tr><td>動画</td><td>${esc(r.videoName)}（${r.width}×${r.height}）</td></tr>
+      <tr><td>解析エンジン</td><td>${r.engine === "rtmpose" ? "RTMPose（Halpe26）" : "MediaPipe Pose"}${r.backendName ? `・${r.backendName}` : ""}</td></tr>
       <tr><td>フレーム数 / fps</td><td>${r.frames} / ${r.fps}</td></tr>
       <tr><td>人物検出フレーム</td><td>${r.detected}（${Math.round((100 * r.detected) / r.frames)}%）</td></tr>
       <tr><td>追跡対象</td><td>${r.dir2 != null ? `往復（${r.direction > 0 ? "右" : "左"}へ→${r.dir2 > 0 ? "右" : "左"}へ）。進行方向に先行する人物` : `画面上の進行方向（${r.direction > 0 ? "右" : "左"}）に先行する人物`}</td></tr>

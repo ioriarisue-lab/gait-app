@@ -86,6 +86,26 @@
     <p class="hint">pose_landmarker_heavy.task（Python版で使っているもの）を一度取り込めば端末内に保存され、以後はネットなしで使えます。</p>
     <button id="splitModel" class="btn sub">モデルを2分割して書き出す</button>
     <p class="hint">GitHubにスマホから上げる用です。書き出した .part1 と .part2 の2つを、アプリのファイルと同じ場所にアップロードすると、ほかの人の端末でも自動で読み込まれます。</p>
+    <h2>RTMPose（任意）</h2>
+    <p class="hint">解析エンジンでRTMPoseを選ぶときに使います。rtmlibと同じ組み合わせ（人物検出YOLOX＋RTMPose Halpe26）の.onnxを取り込んでください。</p>
+    <p>人物検出モデル（rtm_det.onnx）：<span id="rtm_detStatus">-</span></p>
+    <div class="row">
+      <label class="btn sub small">取り込む<input id="rtm_detImport" type="file" accept=".onnx,application/octet-stream" hidden></label>
+      <button id="rtm_detSplit" class="btn sub small">分割して書き出す</button>
+      <button id="rtm_detDel" class="btn sub small">削除</button>
+    </div>
+    <p>姿勢推定モデル（rtm_pose.onnx）：<span id="rtm_poseStatus">-</span></p>
+    <div class="row">
+      <label class="btn sub small">取り込む<input id="rtm_poseImport" type="file" accept=".onnx,application/octet-stream" hidden></label>
+      <button id="rtm_poseSplit" class="btn sub small">分割して書き出す</button>
+      <button id="rtm_poseDel" class="btn sub small">削除</button>
+    </div>
+    <div class="row">
+      <label>計算方法
+        <select id="rtmPref"><option value="auto">自動（GPUが使えればGPU）</option><option value="cpu">CPUのみ</option></select>
+      </label>
+    </div>
+    <p class="hint">GitHubには rtm_det.onnx・rtm_pose.onnx の名前で置くか、「分割して書き出す」で作った .part1, .part2 … を置くと自動で読み込まれます。</p>
     <h2>保存容量</h2>
     <p id="storageInfo">-</p>
     <h2>このアプリについて</h2>
@@ -107,6 +127,13 @@
         <button data-mode="l">← 左へ</button>
         <button data-mode="rl">往復 右→左</button>
         <button data-mode="lr">往復 左→右</button>
+      </div>
+    </div>
+    <div class="row">
+      <span>解析エンジン</span>
+      <div class="seg" id="engSeg">
+        <button data-eng="mediapipe" class="active">MediaPipe</button>
+        <button data-eng="rtmpose">RTMPose</button>
       </div>
     </div>
     <div class="row">

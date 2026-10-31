@@ -1,9 +1,10 @@
 // オフライン用キャッシュ（ファイルを更新したら VERSION を変える）
-const VERSION = "gait-v1.6.1";
+const VERSION = "gait-v1.7.0";
 const ASSETS = [
   "./", "index.html", "style.css", "app.js", "gait.js", "vision_bundle.mjs", "mp4-muxer.mjs",
   "xlsx.mini.min.js", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png",
   "vision_wasm_internal.js", "vision_wasm_internal.wasm",
+  "rtm.js", "ort.webgpu.min.mjs", "ort-wasm-simd-threaded.jsep.mjs", "ort-wasm-simd-threaded.jsep.wasm",
 ];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));

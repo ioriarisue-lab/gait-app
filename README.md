@@ -40,10 +40,25 @@ gait_analysis.py をブラウザ版に移植したアプリです。iPhone・iPa
 - 最初の向きに最も進んだ時点を折り返し点とし、骨盤中心の水平速度が歩行時の30%未満の区間（＋前後0.2秒）を方向転換として除外
 - 往路・復路それぞれで周期を検出（方向転換をまたぐ周期は作らない）。複数人が映る場合は、往路・復路それぞれの進行方向で先頭の人物を追跡
 
+## RTMPose（v1.7.0〜）
+解析設定の「解析エンジン」でMediaPipe／RTMPoseを切り替え（撮影中のリアルタイム表示はMediaPipe）。
+rtmlib の BodyWithFeet と同じ構成（人物検出YOLOX＋RTMPose Halpe26）。前処理・後処理もrtmlibに準拠（姿勢推定の入力はRGB正規化）。
+
+モデル（zipを解凍して中の end2end.onnx を使う）
+- 軽量（スマホ・タブレット向け、おすすめ）
+  - 人物検出: https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_tiny_8xb8-300e_humanart-6f3252f9.zip
+  - 姿勢推定: https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-s_simcc-body7_pt-body7-halpe26_700e-256x192-7f134165_20230605.zip
+- 標準（PC向け、精度優先）
+  - 人物検出: https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip
+  - 姿勢推定: https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.zip
+
+「設定」→RTMPoseで2つの end2end.onnx をそれぞれ取り込み →「分割して書き出す」→ できた rtm_det.onnx.partN / rtm_pose.onnx.partN をGitHubに置くと、ほかの端末でも自動で読み込まれる。
+計算はWebGPU（使えない端末はCPU）。可視性の閾値はRTMPoseでは0.3（rtmlibの既定値）。foot_index列は母趾。
+
 ## Python版との違い
 - 動画はフレームレート（解析画面で指定、既定は録画時の値）に沿って時刻で読み出します
 - 歩行周期を検出できない場合もエラー終了せず、フレーム別の結果と時間軸グラフを出力します
 - 横からの単眼動画による推定であり、臨床測定・診断には使用できません
 
 ファイルを更新したら sw.js の VERSION を変えてください（端末側のキャッシュが更新されます）。
-同梱ライブラリ：@mediapipe/tasks-vision 1.2.0（Apache-2.0、利用統計送信を無効化）、SheetJS（Apache-2.0）、mp4-muxer（MIT）
+同梱ライブラリ：onnxruntime-web 1.22.0（MIT）、@mediapipe/tasks-vision 1.2.0（Apache-2.0、利用統計送信を無効化）、SheetJS（Apache-2.0）、mp4-muxer（MIT）

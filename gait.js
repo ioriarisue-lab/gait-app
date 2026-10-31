@@ -1,5 +1,16 @@
 // 歩行解析ロジック（gait_analysis.py の移植）。DOMに依存しない純粋関数。
-export const VISIBILITY_THRESHOLD = 0.5;
+export let VISIBILITY_THRESHOLD = 0.5;
+let ENGINE_NOTE = "MediaPipe Pose Landmarker による動画各フレームの2D推定値";
+// 解析エンジンの切り替え（RTMPoseは信頼度の目安が違うため閾値を変える）
+export function setEngine(engine) {
+  if (engine === "rtmpose") {
+    VISIBILITY_THRESHOLD = 0.3;
+    ENGINE_NOTE = "RTMPose（Halpe26、人物検出はYOLOX）による動画各フレームの2D推定値。MediaPipe Poseと同じ33点の並びに変換して出力（foot_indexは母趾、visibilityはRTMPoseの信頼度を0〜1に収めた値）。";
+  } else {
+    VISIBILITY_THRESHOLD = 0.5;
+    ENGINE_NOTE = "MediaPipe Pose Landmarker による動画各フレームの2D推定値";
+  }
+}
 export const SKELETON_CONNECTIONS = [
   [11, 13], [13, 15], [12, 14], [14, 16], [11, 12],
   [11, 23], [12, 24], [23, 24], [23, 25], [25, 27],
@@ -208,9 +219,9 @@ export function chooseCycleSide(rows) {
 
 export function notesTable(cycleSide, nCycles, perCycleRef = null) {
   const rows = [
-    ["内容", "MediaPipe Pose Landmarker による動画各フレームの2D推定値"],
+    ["内容", ENGINE_NOTE],
     ["角度の定義", "膝・股関節とも、伸展位を約0度とする屈曲方向の角度（度）。股関節は肩-股-膝の2D角度から算出。"],
-    ["欠損値", "ランドマークが見えない、または可視性が0.5未満の場合は空欄"],
+    ["欠損値", `ランドマークが見えない、または可視性が${VISIBILITY_THRESHOLD}未満の場合は空欄`],
     ["歩行周期", `${cycleSide}足の足先位置の前方極値から接地を推定し、連続する接地間を0〜100%に正規化。検出周期数: ${nCycles}。接地タイミングは推定値です。`],
     ["座標", "関節点ごとに画像内の正規化X/Y（0〜1）とピクセルX/Yを記録。画像左上が(0,0)、右下方向へ値が増加します。visibilityは推定可視性です。"],
     ["注意", "横からの単眼動画による推定であり、臨床測定・診断には使用できません。撮影角度、隠れ、衣服、左右の重なり等で誤差が生じます。"],
