@@ -22,6 +22,8 @@ select, input[type=number] { font-size:17px; padding:8px 10px; border:1px solid 
 .btn:disabled { opacity:.4; }
 .camwrap { position:relative; background:#000; border-radius:12px; overflow:hidden; aspect-ratio:16/9; }
 .camwrap video { width:100%; height:100%; object-fit:contain; }
+#liveCanvas { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+.livefps { position:absolute; top:12px; right:12px; background:rgba(0,0,0,.55); color:#9ef0a0; padding:4px 10px; border-radius:8px; font-size:13px; font-variant-numeric:tabular-nums; }
 .cammsg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#ccc; }
 .rectimer { position:absolute; top:12px; left:12px; background:rgba(0,0,0,.6); color:#ff5a4d; padding:6px 12px; border-radius:8px; font-weight:700; font-variant-numeric:tabular-nums; }
 .hint { color:var(--sub); font-size:14px; line-height:1.6; }
@@ -42,6 +44,11 @@ select, input[type=number] { font-size:17px; padding:8px 10px; border:1px solid 
 .seg button { font-size:17px; padding:10px 20px; border:0; background:#fff; color:var(--main); }
 .seg button.active { background:var(--main); color:#fff; }
 progress { width:100%; height:14px; }
+.tag { font-size:12px; font-weight:600; background:#e3ebe9; color:var(--main); padding:2px 8px; border-radius:8px; vertical-align:middle; }
+.tblwrap { overflow-x:auto; margin:8px 0; }
+table.cyc { border-collapse:collapse; font-size:13px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+table.cyc th, table.cyc td { border-bottom:1px solid #e3e8e7; padding:6px 10px; text-align:right; }
+table.cyc th { color:var(--sub); font-weight:600; background:#f4f6f5; }
 .hidden { display:none !important; }
 .toast { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 24px); transform:translateX(-50%); background:#222; color:#fff; padding:12px 20px; border-radius:10px; z-index:30; max-width:90vw; font-size:15px; }
 #resultView { background:#fff; border-radius:12px; padding:16px; margin-bottom:16px; }

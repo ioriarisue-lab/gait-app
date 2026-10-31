@@ -6,8 +6,8 @@ export const SKELETON_CONNECTIONS = [
   [27, 29], [29, 31], [24, 26], [26, 28], [28, 30], [30, 32],
 ];
 export const IDS = {
-  left: { shoulder: 11, hip: 23, knee: 25, ankle: 27, foot_index: 31 },
-  right: { shoulder: 12, hip: 24, knee: 26, ankle: 28, foot_index: 32 },
+  left: { shoulder: 11, hip: 23, knee: 25, ankle: 27, heel: 29, foot_index: 31 },
+  right: { shoulder: 12, hip: 24, knee: 26, ankle: 28, heel: 30, foot_index: 32 },
 };
 const SIDES = ["left", "right"];
 const XY_JOINTS = ["shoulder", "hip", "knee", "ankle"];
@@ -90,6 +90,10 @@ export function buildRow(frameIndex, fps, timestampMs, w, h, pose) {
       row[`_${s}_foot_index_x`] = ft ? ft[0] : null;
       row[`_${s}_foot_index_visibility`] = ftv;
       row[`_${s}_hip_x`] = hp ? hp[0] : null;
+      const [he] = getPoint(pose, id.heel, w, h);
+      row[`_${s}_heel_x`] = he ? he[0] : null;
+      row[`_${s}_heel_y`] = he ? he[1] : null;
+      row[`_${s}_toe_y`] = ft ? ft[1] : null;
     } else {
       row[`${s}_hip_flexion_deg`] = null;
       row[`${s}_knee_flexion_deg`] = null;
@@ -202,8 +206,8 @@ export function chooseCycleSide(rows) {
   return score("right") > score("left") ? "right" : "left";
 }
 
-export function notesTable(cycleSide, nCycles) {
-  return [
+export function notesTable(cycleSide, nCycles, perCycleRef = null) {
+  const rows = [
     ["内容", "MediaPipe Pose Landmarker による動画各フレームの2D推定値"],
     ["角度の定義", "膝・股関節とも、伸展位を約0度とする屈曲方向の角度（度）。股関節は肩-股-膝の2D角度から算出。"],
     ["欠損値", "ランドマークが見えない、または可視性が0.5未満の場合は空欄"],
@@ -211,4 +215,141 @@ export function notesTable(cycleSide, nCycles) {
     ["座標", "関節点ごとに画像内の正規化X/Y（0〜1）とピクセルX/Yを記録。画像左上が(0,0)、右下方向へ値が増加します。visibilityは推定可視性です。"],
     ["注意", "横からの単眼動画による推定であり、臨床測定・診断には使用できません。撮影角度、隠れ、衣服、左右の重なり等で誤差が生じます。"],
   ];
+  if (perCycleRef) rows[3] = ["歩行周期", perCycleNote(perCycleRef) + ` 検出周期数: ${nCycles}。`];
+  return rows;
+}
+
+// ---------- 一歩行周期ごとの解析（踵・つま先の最下点による周期の開始） ----------
+// 基準足が対側足より前にある区間で、最も前に出た（前方位置が最大に達した最初の）時点の踵とつま先の高さを比べ、
+// 踵が低ければ踵、つま先が低ければつま先の上下座標が最下点に達した最初のフレームを周期の開始とする。
+// 画像座標はyが下向きに増えるので、「低い」「最下点」はyが大きいことを意味する。
+function smoothSeries(values, fps) {
+  const v = interpolateBoth(values);
+  if (!v.length || !v.every(Number.isFinite)) return null;
+  const win = Math.max(3, pyRound(fps * 0.12) | 1), half = Math.floor(win / 2), n = v.length;
+  return v.map((_, i) => {
+    let s = 0, c = 0;
+    for (let j = Math.max(0, i - half); j <= Math.min(n - 1, i + half); j++) { s += v[j]; c++; }
+    return s / c;
+  });
+}
+export const LOWEST_TOLERANCE_RATIO = 0.003; // 最下点の判定幅（画像の高さに対する比）
+
+export function heelToeContacts(rows, refSide, direction, fps, height) {
+  const oth = refSide === "left" ? "right" : "left";
+  const S = (k) => smoothSeries(rows.map((r) => r[k]), fps);
+  const rHx = S(`_${refSide}_heel_x`), rTx = S(`_${refSide}_foot_index_x`);
+  const rHy = S(`_${refSide}_heel_y`), rTy = S(`_${refSide}_toe_y`);
+  const rawHy = interpolateBoth(rows.map((r) => r[`_${refSide}_heel_y`])), rawTy = interpolateBoth(rows.map((r) => r[`_${refSide}_toe_y`]));
+  const oHx = S(`_${oth}_heel_x`), oTx = S(`_${oth}_foot_index_x`);
+  if (!rHx || !rTx || !rHy || !rTy || !oHx || !oTx) return [];
+  const n = rows.length, dir = direction >= 0 ? 1 : -1;
+  const posR = rHx.map((x, i) => ((x + rTx[i]) / 2) * dir);
+  const posO = oHx.map((x, i) => ((x + oTx[i]) / 2) * dir);
+  const minLen = Math.max(3, Math.round(fps * 0.1));
+  const segs = [];
+  let st = -1;
+  for (let i = 0; i <= n; i++) {
+    const f = i < n && posR[i] > posO[i];
+    if (f && st < 0) st = i;
+    if (!f && st >= 0) { if (i - st >= minLen) segs.push([st, i - 1]); st = -1; }
+  }
+  const tol = height * LOWEST_TOLERANCE_RATIO;
+  const tolX = height * LOWEST_TOLERANCE_RATIO;
+  const out = [];
+  for (const [a, b] of segs) {
+    // 「最も前に出た時点」＝前方位置が区間の最大値に最初に達したフレーム（立脚中は足が止まるため最初の到達点を使う）
+    let pmax = -Infinity;
+    for (let i = a; i <= b; i++) pmax = Math.max(pmax, posR[i]);
+    let peak = a;
+    for (let i = a; i <= b; i++) if (posR[i] >= pmax - tolX) { peak = i; break; }
+    let hy = 0, ty = 0, c = 0;
+    for (let i = Math.max(a, peak - 2); i <= Math.min(b, peak + 2); i++) { hy += rHy[i]; ty += rTy[i]; c++; }
+    const type = hy / c >= ty / c ? "heel" : "toe";
+    const y = type === "heel" ? rHy : rTy;
+    let ymax = -Infinity;
+    for (let i = a; i <= b; i++) ymax = Math.max(ymax, y[i]);
+    let frame = a;
+    for (let i = a; i <= b; i++) if (y[i] >= ymax - tol) { frame = i; break; }
+    // 平滑化による遅れを補正：平滑化前の座標で、同じ高さに最初に達したフレームまでさかのぼる
+    const raw = type === "heel" ? rawHy : rawTy, half = Math.floor(Math.max(3, pyRound(fps * 0.12) | 1) / 2);
+    for (let i = Math.max(a, frame - half); i <= frame; i++) if (Number.isFinite(raw[i]) && raw[i] >= ymax - tol) { frame = i; break; }
+    // 区間の端（動画の最初・最後で途切れた区間）は除外
+    if (a === 0 || b === n - 1) continue;
+    out.push({ frame, type, front_start: a, front_end: b, most_forward: peak });
+  }
+  return out;
+}
+
+function normalize101(series) {
+  const phase = Array.from({ length: 101 }, (_, i) => i);
+  const seg = interpolateBoth(series);
+  if (seg.length < 2 || seg.every(Number.isNaN)) return phase.map(() => NaN);
+  const xp = seg.map((_, o) => (100 * o) / (seg.length - 1));
+  return phase.map((p) => interp(p, xp, seg));
+}
+
+export function perCycleAnalysis(rows, refSide, direction, fps, height) {
+  const contacts = heelToeContacts(rows, refSide, direction, fps, height);
+  const cycles = [];
+  for (let k = 0; k < contacts.length - 1; k++) {
+    const a = contacts[k].frame, b = contacts[k + 1].frame, dur = (b - a) / fps;
+    if (dur < 0.5 || dur > 5) continue;
+    cycles.push({ a, b, type: contacts[k].type, nextType: contacts[k + 1].type });
+  }
+  if (!cycles.length) {
+    throw new Error(`${refSide === "left" ? "左" : "右"}足を基準にした歩行周期を検出できませんでした。踵とつま先が見える真横からの動画で、基準足が2回以上接地する区間を含めてください。`);
+  }
+  const keys = [];
+  for (const s of SIDES) for (const j of ["knee", "hip"]) keys.push([s, j]);
+  const r3 = (x) => round(x, 3), r2 = (x) => (Number.isFinite(x) ? round(x, 2) : null);
+  const typeJ = (t) => (t === "heel" ? "踵" : "つま先");
+  const list = cycles.map((c, idx) => {
+    const norm = Array.from({ length: 101 }, (_, p) => ({ cycle: idx + 1, gait_cycle_percent: p }));
+    const summary = {
+      cycle: idx + 1, reference_side: refSide, start_contact: typeJ(c.type),
+      start_frame: c.a, start_time_seconds: r3(c.a / fps), end_frame: c.b, end_time_seconds: r3(c.b / fps),
+      cycle_duration_seconds: r3((c.b - c.a) / fps),
+    };
+    let det = 0;
+    for (let i = c.a; i <= c.b; i++) if (rows[i].left_knee_flexion_deg != null || rows[i].right_knee_flexion_deg != null) det++;
+    summary.detected_frames_percent = round((100 * det) / (c.b - c.a + 1), 1);
+    for (const [s, j] of keys) {
+      const raw = rows.slice(c.a, c.b + 1).map((r) => r[`${s}_${j}_flexion_deg`]);
+      const nv = normalize101(raw);
+      nv.forEach((v, p) => (norm[p][`${s}_${j}_deg`] = Number.isNaN(v) ? null : v));
+      const valid = raw.filter(isNum);
+      const mx = valid.length ? Math.max(...valid) : NaN, mn = valid.length ? Math.min(...valid) : NaN;
+      summary[`${s}_${j}_max_deg`] = r2(mx);
+      summary[`${s}_${j}_min_deg`] = r2(mn);
+      summary[`${s}_${j}_range_deg`] = r2(mx - mn);
+    }
+    return { summary, norm, a: c.a, b: c.b };
+  });
+  // 全周期の平均（従来の正規化グラフと同じ列名）
+  const cycleData = Array.from({ length: 101 }, (_, p) => {
+    const o = { gait_cycle_percent: p };
+    for (const [s, j] of keys) {
+      const vals = list.map((c) => c.norm[p][`${s}_${j}_deg`]).filter(isNum);
+      o[`${s}_${j}_mean_deg`] = vals.length ? vals.reduce((x, y) => x + y, 0) / vals.length : null;
+    }
+    return o;
+  });
+  const events = list.map((c) => ({
+    side: refSide, cycle: c.summary.cycle, start_contact_frame: c.a, start_time_seconds: c.summary.start_time_seconds,
+    next_contact_frame: c.b, next_contact_time_seconds: c.summary.end_time_seconds, cycle_duration_seconds: c.summary.cycle_duration_seconds,
+    start_contact: c.summary.start_contact,
+  }));
+  return { list, cycleData, events, contacts };
+}
+
+export const SUMMARY_COLUMNS = (() => {
+  const c = ["cycle", "reference_side", "start_contact", "start_frame", "start_time_seconds", "end_frame", "end_time_seconds", "cycle_duration_seconds", "detected_frames_percent"];
+  for (const s of SIDES) for (const j of ["knee", "hip"]) c.push(`${s}_${j}_max_deg`, `${s}_${j}_min_deg`, `${s}_${j}_range_deg`);
+  return c;
+})();
+export const NORM_COLUMNS = ["cycle", "gait_cycle_percent", "left_knee_deg", "left_hip_deg", "right_knee_deg", "right_hip_deg"];
+
+export function perCycleNote(refSide) {
+  return `${refSide === "left" ? "左" : "右"}足を基準足とし、基準足が対側足より前にある区間で最も前に出た時点の踵とつま先の高さを比較。踵が低ければ踵、つま先が低ければつま先の上下座標が最下点（画像の高さの${LOWEST_TOLERANCE_RATIO * 100}%以内）に最初に達したフレームを周期の開始とし、次の開始までを1周期（0〜100%）とした。座標は移動平均で平滑化。`;
 }

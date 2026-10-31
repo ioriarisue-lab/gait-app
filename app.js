@@ -2,7 +2,7 @@ import { PoseLandmarker } from "./vision_bundle.mjs";
 import { Muxer, ArrayBufferTarget } from "./mp4-muxer.mjs";
 import * as G from "./gait.js";
 
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.5.0";
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -102,6 +102,69 @@ async function startCamera() {
   $("#camBtn").textContent = "カメラ再起動";
   const s = stream.getVideoTracks()[0].getSettings();
   toast(`カメラ: ${s.width}×${s.height} / ${Math.round(s.frameRate || fps)} fps`);
+  if ($("#liveChk").checked) startLive();
+}
+
+// ---------- リアルタイム骨格表示 ----------
+let liveLastPose = null, liveLm = null, liveOn = false, liveDir = 1, liveLastTs = 0, liveFrames = 0, liveFpsT = 0;
+$$("#liveSeg button").forEach((b) => b.addEventListener("click", () => {
+  liveDir = Number(b.dataset.dir);
+  $$("#liveSeg button").forEach((x) => x.classList.toggle("active", x === b));
+}));
+$("#liveChk").addEventListener("change", (e) => { if (e.target.checked) startLive(); else { if ($("#saveSkel").checked) $("#saveSkel").checked = false; stopLive(); } });
+$("#saveSkel").addEventListener("change", (e) => { if (e.target.checked && !$("#liveChk").checked) { $("#liveChk").checked = true; startLive(); } });
+async function startLive() {
+  if (!stream || liveOn) return;
+  liveOn = true;
+  if (!liveLm) {
+    $("#liveFps").classList.remove("hidden"); $("#liveFps").textContent = "骨格モデル準備中…";
+    try { liveLm = await createLandmarker(); }
+    catch (e) { toast(e.message, 5000); liveOn = false; $("#liveChk").checked = false; $("#liveFps").classList.add("hidden"); return; }
+  }
+  if (!liveOn || !stream) return;
+  $("#liveFps").classList.remove("hidden");
+  liveFrames = 0; liveFpsT = performance.now();
+  const v = $("#preview");
+  const next = (cb) => (v.requestVideoFrameCallback ? v.requestVideoFrameCallback(cb) : requestAnimationFrame(cb));
+  const step = () => {
+    if (!liveOn || !stream) return;
+    try {
+      if (v.readyState >= 2 && v.videoWidth) {
+        const ts = Math.max(performance.now(), liveLastTs + 1);
+        liveLastTs = ts;
+        const res = liveLm.detectForVideo(v, ts);
+        liveLastPose = G.chooseLeadingPose(res.landmarks || [], v.videoWidth, v.videoHeight, liveDir);
+        drawLive(liveLastPose, v.videoWidth, v.videoHeight);
+        liveFrames++;
+        const now = performance.now();
+        if (now - liveFpsT > 1000) { $("#liveFps").textContent = `骨格 ${Math.round((liveFrames * 1000) / (now - liveFpsT))} fps`; liveFrames = 0; liveFpsT = now; }
+      }
+    } catch (e) { console.warn(e); }
+    next(step);
+  };
+  next(step);
+}
+function stopLive() {
+  liveOn = false; liveLastPose = null;
+  const c = $("#liveCanvas"); c.getContext("2d").clearRect(0, 0, c.width, c.height);
+  $("#liveFps").classList.add("hidden");
+}
+function drawLive(pose, W, H) {
+  const c = $("#liveCanvas");
+  if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, W, H);
+  drawSkeleton(ctx, pose, W, H);
+}
+function drawSkeleton(ctx, pose, W, H) {
+  if (!pose) return;
+  const k = Math.max(1, W / 640);
+  const xy = {};
+  pose.forEach((lm, i) => { if ((lm.visibility ?? 1) >= G.VISIBILITY_THRESHOLD) xy[i] = [lm.x * W, lm.y * H]; });
+  ctx.lineCap = "round"; ctx.lineWidth = 3 * k; ctx.strokeStyle = "rgb(80,230,70)";
+  for (const [a, b] of G.SKELETON_CONNECTIONS) if (xy[a] && xy[b]) { ctx.beginPath(); ctx.moveTo(...xy[a]); ctx.lineTo(...xy[b]); ctx.stroke(); }
+  ctx.fillStyle = "rgb(255,80,30)";
+  for (const p of Object.values(xy)) { ctx.beginPath(); ctx.arc(p[0], p[1], 4 * k, 0, Math.PI * 2); ctx.fill(); }
 }
 function fitPreview() {
   const v = $("#preview"), w = v.videoWidth, h = v.videoHeight;
@@ -112,6 +175,7 @@ function fitPreview() {
 $("#preview").addEventListener("resize", fitPreview);
 window.addEventListener("orientationchange", () => setTimeout(() => stream && !recorder && startCamera(), 600));
 function stopCamera() {
+  stopLive();
   if (stream) stream.getTracks().forEach((t) => t.stop());
   stream = null; $("#preview").srcObject = null;
   $("#camMsg").classList.remove("hidden"); $("#camMsg").textContent = "「カメラ起動」を押してください";
@@ -124,25 +188,59 @@ function pickMime() {
   const list = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm"];
   return list.find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
 }
-$("#recBtn").onclick = () => {
-  if (recorder) { recorder.stop(); return; }
+let skelRec = null, skelChunks = [], compLoopOn = false;
+function makeRecorder(src, mimeType, store, onDone) {
+  const r = new MediaRecorder(src, { mimeType, videoBitsPerSecond: 12_000_000 });
+  r.ondataavailable = (e) => e.data.size && store.push(e.data);
+  r.onstop = () => onDone(new Blob(store, { type: r.mimeType || mimeType || "video/mp4" }));
+  return r;
+}
+$("#recBtn").onclick = async () => {
+  if (recorder) { recorder.stop(); if (skelRec) skelRec.stop(); return; }
   if (!stream) return;
   const mimeType = pickMime();
-  chunks = [];
-  recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 12_000_000 });
-  recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-  recorder.onstop = async () => {
+  const name = `walk_${stamp()}`;
+  const fpsSet = stream.getVideoTracks()[0].getSettings().frameRate;
+  const ext = (t) => (t.includes("webm") ? "webm" : "mp4");
+  let pending = 1;
+  const finish = () => {
+    if (--pending > 0) return;
     clearInterval(recTick); $("#recTimer").classList.add("hidden");
     $("#recBtn").textContent = "録画開始"; keepAwake(false);
-    const type = recorder.mimeType || mimeType || "video/mp4";
-    const s = stream ? stream.getVideoTracks()[0].getSettings() : {};
-    recorder = null;
-    const blob = new Blob(chunks, { type }); chunks = [];
-    const ext = type.includes("webm") ? "webm" : "mp4";
-    await addVideo(blob, `walk_${stamp(new Date(recStart))}.${ext}`, s.frameRate ? Math.round(s.frameRate) : null);
     toast("端末内に保存しました（「動画」タブ）");
   };
+  chunks = [];
+  recorder = makeRecorder(stream, mimeType, chunks, async (blob) => {
+    recorder = null;
+    await addVideo(blob, `${name}.${ext(blob.type)}`, fpsSet ? Math.round(fpsSet) : null);
+    finish();
+  });
+  // 骨格入り動画：映像と骨格をキャンバスに合成して同時に録画
+  if ($("#saveSkel").checked) {
+    if (!$("#liveChk").checked) { $("#liveChk").checked = true; }
+    await startLive();
+    const v = $("#preview"), comp = document.createElement("canvas");
+    comp.width = v.videoWidth; comp.height = v.videoHeight;
+    const cx = comp.getContext("2d");
+    compLoopOn = true;
+    const draw = () => {
+      if (!compLoopOn) return;
+      if (v.videoWidth) { cx.drawImage(v, 0, 0, comp.width, comp.height); drawSkeleton(cx, liveLastPose, comp.width, comp.height); }
+      requestAnimationFrame(draw);
+    };
+    draw();
+    try {
+      skelChunks = [];
+      skelRec = makeRecorder(comp.captureStream(Math.round(fpsSet || 30)), mimeType, skelChunks, async (blob) => {
+        compLoopOn = false; skelRec = null;
+        await addVideo(blob, `${name}_skeleton.${ext(blob.type)}`, fpsSet ? Math.round(fpsSet) : null, true);
+        finish();
+      });
+      pending = 2;
+    } catch (e) { compLoopOn = false; skelRec = null; toast("骨格入り動画を録画できません: " + e.message, 4000); }
+  }
   recorder.start(1000);
+  if (skelRec) skelRec.start(1000);
   recStart = Date.now(); keepAwake(true);
   $("#recBtn").textContent = "録画停止";
   $("#recTimer").classList.remove("hidden");
@@ -189,9 +287,9 @@ async function makeThumb(blob) {
   } catch { return {}; }
 }
 
-async function addVideo(blob, name, fps) {
+async function addVideo(blob, name, fps, skeleton = false) {
   const meta = await makeThumb(blob);
-  await dbPut("videos", { id: uid(), name, created: Date.now(), type: blob.type, size: blob.size, blob, fps, ...meta });
+  await dbPut("videos", { id: uid(), name, created: Date.now(), type: blob.type, size: blob.size, blob, fps, skeleton, ...meta });
   renderVideos();
 }
 $("#importVideo").onchange = async (e) => {
@@ -209,10 +307,10 @@ async function renderVideos() {
   ul.innerHTML = list.map((v) => `
     <li data-id="${v.id}">
       ${v.thumb ? `<img class="thumb" src="${v.thumb}">` : `<div class="thumb"></div>`}
-      <div class="meta"><b>${esc(v.name)}</b>
+      <div class="meta"><b>${esc(v.name)}${v.skeleton ? ' <span class="tag">骨格入り</span>' : ""}</b>
         <span>${fmtDate(v.created)} ・ ${v.duration ? v.duration.toFixed(1) + " 秒" : ""} ・ ${v.width ? v.width + "×" + v.height : ""} ・ ${fmtSize(v.size)}${v.fps ? " ・ " + v.fps + " fps" : ""}</span></div>
       <div class="acts">
-        <button class="btn small" data-act="analyze">解析</button>
+        ${v.skeleton ? "" : `<button class="btn small" data-act="analyze">解析</button>`}
         <button class="btn small sub" data-act="export">保存/共有</button>
         <button class="btn small sub" data-act="delete">削除</button>
       </div>
@@ -281,6 +379,7 @@ async function renderSettings() {
   $("#verInfo").textContent = `バージョン ${APP_VERSION}`;
 }
 async function createLandmarker() {
+  if (window.__mockLm) return window.__mockLm(); // テスト用
   const bytes = await getModel();
   if (!bytes) throw new Error("姿勢推定モデルが未設定です。「設定」タブで pose_landmarker_heavy.task を取り込んでください。");
   const fileset = {
@@ -297,10 +396,15 @@ async function createLandmarker() {
 }
 
 // ---------- 解析ダイアログ ----------
-let anaRec = null, anaDir = 1, cancelFlag = false, running = false;
-$$(".seg button").forEach((b) => b.addEventListener("click", () => {
+let anaRec = null, anaDir = 1, anaRef = "right", cancelFlag = false, running = false;
+$$("#refSeg button").forEach((b) => b.addEventListener("click", () => {
+  anaRef = b.dataset.ref;
+  $$("#refSeg button").forEach((x) => x.classList.toggle("active", x === b));
+}));
+$("#anaPerCycle").addEventListener("change", (e) => { $("#refSeg").classList.toggle("hidden", !e.target.checked); $("#refHint").classList.toggle("hidden", !e.target.checked); });
+$$("#anaSeg button").forEach((b) => b.addEventListener("click", () => {
   anaDir = Number(b.dataset.dir);
-  $$(".seg button").forEach((x) => x.classList.toggle("active", x === b));
+  $$("#anaSeg button").forEach((x) => x.classList.toggle("active", x === b));
 }));
 async function openAnalyze(rec) {
   anaRec = rec;
@@ -346,7 +450,7 @@ $("#anaStart").onclick = async () => {
   $("#anaProgress").classList.remove("hidden");
   keepAwake(true);
   try {
-    const result = await analyze(anaRec, anaDir, fps, $("#anaStick").checked, (i, n, msg) => {
+    const result = await analyze(anaRec, anaDir, fps, $("#anaStick").checked, { perCycle: $("#anaPerCycle").checked, refSide: anaRef }, (i, n, msg) => {
       $("#anaBar").value = n ? i / n : 0;
       $("#anaText").textContent = msg || `${i} / ${n} フレーム`;
     });
@@ -409,7 +513,7 @@ async function setupEncoder(W, H, fps) {
   };
 }
 
-async function analyze(rec, direction, fps, makeStick, progress) {
+async function analyze(rec, direction, fps, makeStick, opts, progress) {
   progress(0, 0, "モデルを準備中…");
   const landmarker = await createLandmarker();
   const v = await loadVideoEl(rec.blob, true);
@@ -441,22 +545,40 @@ async function analyze(rec, direction, fps, makeStick, progress) {
   progress(total, total, "ファイルを作成中…");
   const stick = enc ? await enc.finish() : null;
 
-  const cycleSide = G.chooseCycleSide(rows);
-  let cycleData = null, events = [], warning = "";
-  try { ({ cycleData, events } = G.normalizedCycles(rows, cycleSide, fps, W)); }
-  catch (e) { warning = e.message; }
+  let cycleSide = G.chooseCycleSide(rows);
+  let cycleData = null, events = [], warning = "", pc = null;
+  if (opts.perCycle) {
+    try { pc = G.perCycleAnalysis(rows, opts.refSide, direction, fps, H); ({ cycleData, events } = pc); cycleSide = opts.refSide; }
+    catch (e) { warning = e.message + "（平均グラフはPython版と同じ方法で作成しました）"; }
+  }
+  if (!pc) {
+    try { ({ cycleData, events } = G.normalizedCycles(rows, cycleSide, fps, W)); }
+    catch (e) { warning += (warning ? "\n" : "") + e.message; }
+  }
   if (makeStick && !enc) warning += (warning ? "\n" : "") + "この端末ではスティックピクチャー動画を作成できませんでした（iOS / iPadOS 16.4以降が必要）。";
 
   const base = rec.name.replace(/\.[^.]+$/, "") + "_gait_angles";
   const cols = G.exportColumns();
   const csv = new Blob(["﻿" + toCSV(cols, rows)], { type: "text/csv" });
-  const xlsx = buildXlsx(cols, rows, cycleData, events, cycleSide);
+  const xlsx = buildXlsx(cols, rows, cycleData, events, cycleSide, pc, opts.refSide);
   const png = await canvasBlob(drawGraph(rows, cycleData, events.length, fps));
+  let perCycle = null;
+  if (pc) {
+    const pcols = ["cycle_percent", ...cols];
+    perCycle = {
+      refSide: opts.refSide,
+      summaries: pc.list.map((c) => c.summary),
+      norms: pc.list.map((c) => c.norm),
+      csvs: pc.list.map((c) => new Blob(["\ufeff" + toCSV(pcols, rows.slice(c.a, c.b + 1).map((r, i) => ({ ...r, cycle_percent: Math.round((10000 * i) / (c.b - c.a)) / 100 })))], { type: "text/csv" })),
+      summaryCsv: new Blob(["\ufeff" + toCSV(G.SUMMARY_COLUMNS, pc.list.map((c) => c.summary))], { type: "text/csv" }),
+      normCsv: new Blob(["\ufeff" + toCSV(G.NORM_COLUMNS, pc.list.flatMap((c) => c.norm))], { type: "text/csv" }),
+    };
+  }
   const detected = rows.filter((r) => r.left_knee_flexion_deg != null || r.right_knee_flexion_deg != null).length;
   return {
     id: uid(), videoId: rec.id, videoName: rec.name, base, created: Date.now(), direction, fps,
     frames: rows.length, width: W, height: H, detected, cycleSide, nCycles: events.length, events, warning,
-    csv, xlsx, png, stick,
+    csv, xlsx, png, stick, perCycle,
   };
 }
 
@@ -465,21 +587,26 @@ function toCSV(cols, rows) {
   return [cols.join(","), ...rows.map((r) => cols.map((c) => cell(r[c])).join(","))].join("\r\n") + "\r\n";
 }
 function aoa(cols, objs) { return [cols, ...objs.map((o) => cols.map((c) => (o[c] == null || Number.isNaN(o[c]) ? null : o[c])))]; }
-function buildXlsx(cols, rows, cycleData, events, cycleSide) {
+function buildXlsx(cols, rows, cycleData, events, cycleSide, pc = null, refSide = null) {
   const X = window.XLSX, wb = X.utils.book_new();
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(cols, rows)), "フレーム別角度");
   const ccols = ["gait_cycle_percent", "left_knee_mean_deg", "left_hip_mean_deg", "right_knee_mean_deg", "right_hip_mean_deg"];
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(cycleData ? aoa(ccols, cycleData) : [ccols, ["歩行周期を検出できませんでした"]]), "正規化グラフ用");
   const ecols = ["side", "cycle", "start_contact_frame", "start_time_seconds", "next_contact_frame", "next_contact_time_seconds", "cycle_duration_seconds"];
+  if (pc) ecols.push("start_contact");
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(ecols, events)), "推定接地");
-  X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([["項目", "説明"], ...G.notesTable(cycleSide, events.length)]), "説明");
+  if (pc) {
+    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(G.SUMMARY_COLUMNS, pc.list.map((c) => c.summary))), "周期一覧");
+    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(G.NORM_COLUMNS, pc.list.flatMap((c) => c.norm))), "周期別_正規化");
+  }
+  X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([["項目", "説明"], ...G.notesTable(cycleSide, events.length, pc ? refSide : null)]), "説明");
   const out = X.write(wb, { type: "array", bookType: "xlsx" });
   return new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 }
 const canvasBlob = (c) => new Promise((r) => c.toBlob(r, "image/png"));
 
 // グラフ（matplotlib版と同じ構成：上=膝、下=股関節）
-function drawGraph(rows, cycleData, nCycles, fps) {
+function drawGraph(rows, cycleData, nCycles, fps, opt = {}) {
   const Wc = 1920, Hc = 1280, c = document.createElement("canvas"); c.width = Wc; c.height = Hc;
   const g = c.getContext("2d");
   g.fillStyle = "#fff"; g.fillRect(0, 0, Wc, Hc);
@@ -490,7 +617,7 @@ function drawGraph(rows, cycleData, nCycles, fps) {
   else { xs = rows.map((r) => r.time_seconds); xmax = Math.max(1e-6, xs[xs.length - 1]); xlabel = "時間（秒）"; }
   g.fillStyle = "#000"; g.textAlign = "center"; g.textBaseline = "middle";
   g.font = font(34, "bold");
-  g.fillText(cyc ? "歩行周期に対する2D角度推定 — 臨床測定ではありません" : "フレーム別2D角度推定（歩行周期は検出できませんでした）— 臨床測定ではありません", Wc / 2, 40);
+  g.fillText(opt.title ? opt.title : cyc ? "歩行周期に対する2D角度推定 — 臨床測定ではありません" : "フレーム別2D角度推定（歩行周期は検出できませんでした）— 臨床測定ではありません", Wc / 2, 40);
   const panels = [
     { joint: "knee", title: cyc ? "歩行周期に対する膝の推定屈曲角度" : "膝の推定屈曲角度", name: "膝" },
     { joint: "hip", title: cyc ? "歩行周期に対する股関節の推定屈曲角度" : "股関節の推定屈曲角度", name: "股関節" },
@@ -524,7 +651,7 @@ function drawGraph(rows, cycleData, nCycles, fps) {
     names.forEach((n, si) => {
       g.strokeStyle = colors[si]; g.lineWidth = 3; g.beginPath(); g.moveTo(lx + 16, ly + 24 + si * 38); g.lineTo(lx + 66, ly + 24 + si * 38); g.stroke();
       g.fillStyle = "#000"; g.textAlign = "left"; g.font = font(22);
-      g.fillText(cyc ? `${n}${p.name}（${nCycles}周期平均）` : `${n}${p.name}`, lx + 78, ly + 24 + si * 38);
+      g.fillText(cyc ? `${n}${p.name}（${opt.legend || nCycles + "周期平均"}）` : `${n}${p.name}`, lx + 78, ly + 24 + si * 38);
     });
   });
   g.textAlign = "center"; g.font = font(26); g.fillStyle = "#000";
@@ -576,7 +703,8 @@ async function openResult(id) {
       <tr><td>追跡対象</td><td>画面上の進行方向（${r.direction > 0 ? "右" : "左"}）に先行する人物</td></tr>
       <tr><td>周期</td><td>${sideJ}側の足・${r.nCycles}周期（接地検出は推定）</td></tr>
     </table>
-    <img src="${u(r.png)}" alt="グラフ">
+    ${r.perCycle ? cycleSection(r) : ""}
+    <img id="graphImg" src="${u(r.png)}" alt="グラフ">
     ${r.stick ? `<h2>スティックピクチャー動画</h2><video src="${u(r.stick)}" controls playsinline></video>` : ""}
     <div class="row">
       <button class="btn" data-f="all">すべて保存/共有</button>
@@ -588,7 +716,49 @@ async function openResult(id) {
     const sel = b.dataset.f === "all" ? files : [files[Number(b.dataset.f)]];
     saveFiles(sel.map((f) => f.file));
   });
+  if (r.perCycle) bindCycleSection(r, u);
   $("#resultView").scrollIntoView({ behavior: "smooth" });
+}
+const sideJp = (s) => (s === "left" ? "左" : "右");
+const fmt1 = (v) => (v == null ? "-" : Number(v).toFixed(1));
+function cycleSection(r) {
+  const pcs = r.perCycle;
+  return `
+    <h2>一歩行周期ごとの結果（基準：${sideJp(pcs.refSide)}足）</h2>
+    <div class="tblwrap"><table class="cyc">
+      <tr><th>周期</th><th>開始</th><th>時間(秒)</th><th>右膝 最大</th><th>右膝 可動域</th><th>左膝 最大</th><th>左膝 可動域</th><th>右股 可動域</th><th>左股 可動域</th></tr>
+      ${pcs.summaries.map((s) => `<tr><td>${s.cycle}</td><td>${s.start_contact}</td><td>${s.cycle_duration_seconds}</td><td>${fmt1(s.right_knee_max_deg)}</td><td>${fmt1(s.right_knee_range_deg)}</td><td>${fmt1(s.left_knee_max_deg)}</td><td>${fmt1(s.left_knee_range_deg)}</td><td>${fmt1(s.right_hip_range_deg)}</td><td>${fmt1(s.left_hip_range_deg)}</td></tr>`).join("")}
+    </table></div>
+    <div class="row">
+      <label>グラフ表示
+        <select id="cycleSel"><option value="avg">全${pcs.summaries.length}周期の平均</option>
+          ${pcs.summaries.map((s, i) => `<option value="${i}">周期${s.cycle}（${s.start_time_seconds}〜${s.end_time_seconds}秒）</option>`).join("")}
+        </select>
+      </label>
+      <button id="cycleSave" class="btn sub small hidden">この周期を保存</button>
+    </div>`;
+}
+function cycleGraph(r, i) {
+  const s = r.perCycle.summaries[i];
+  const data = r.perCycle.norms[i].map((p) => ({
+    gait_cycle_percent: p.gait_cycle_percent,
+    left_knee_mean_deg: p.left_knee_deg, left_hip_mean_deg: p.left_hip_deg, right_knee_mean_deg: p.right_knee_deg, right_hip_mean_deg: p.right_hip_deg,
+  }));
+  return canvasBlob(drawGraph(null, data, 1, r.fps, { legend: `周期${s.cycle}`, title: `周期${s.cycle}（${sideJp(r.perCycle.refSide)}足基準・${s.start_contact}接地）— 臨床測定ではありません` }));
+}
+function bindCycleSection(r, u) {
+  const sel = $("#cycleSel"), img = $("#graphImg"), btn = $("#cycleSave");
+  sel.onchange = async () => {
+    if (sel.value === "avg") { img.src = u(r.png); btn.classList.add("hidden"); return; }
+    img.src = u(await cycleGraph(r, Number(sel.value))); btn.classList.remove("hidden");
+  };
+  btn.onclick = async () => {
+    const i = Number(sel.value), n = String(r.perCycle.summaries[i].cycle).padStart(2, "0");
+    saveFiles([
+      new File([r.perCycle.csvs[i]], `${r.base}_cycle${n}.csv`, { type: "text/csv" }),
+      new File([await cycleGraph(r, i)], `${r.base}_cycle${n}_graph.png`, { type: "image/png" }),
+    ]);
+  };
 }
 function resultFiles(r) {
   const f = [
@@ -596,6 +766,10 @@ function resultFiles(r) {
     { label: "Excel", file: new File([r.xlsx], `${r.base}.xlsx`, { type: r.xlsx.type }) },
     { label: "グラフ", file: new File([r.png], `${r.base}_graph.png`, { type: "image/png" }) },
   ];
+  if (r.perCycle) {
+    f.push({ label: "周期一覧CSV", file: new File([r.perCycle.summaryCsv], `${r.base}_cycle_summary.csv`, { type: "text/csv" }) });
+    f.push({ label: "周期別CSV", file: new File([r.perCycle.normCsv], `${r.base}_cycles_normalized.csv`, { type: "text/csv" }) });
+  }
   if (r.stick) f.push({ label: "スティック動画", file: new File([r.stick], `${r.base}_stick_figure.mp4`, { type: "video/mp4" }) });
   return f;
 }
