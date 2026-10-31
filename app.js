@@ -2,7 +2,7 @@ import { PoseLandmarker } from "./vision_bundle.mjs";
 import { Muxer, ArrayBufferTarget } from "./mp4-muxer.mjs";
 import * as G from "./gait.js";
 
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.6.0";
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -106,9 +106,11 @@ async function startCamera() {
 }
 
 // ---------- リアルタイム骨格表示 ----------
-let liveLastPose = null, liveLm = null, liveOn = false, liveDir = 1, liveLastTs = 0, liveFrames = 0, liveFpsT = 0;
+const MODES = { r: [1, null], l: [-1, null], rl: [1, -1], lr: [-1, 1] };
+let liveTracker = new G.TurnTracker(1, null, 1), liveMode = "r", liveFrameNo = 0;
+let liveLastPose = null, liveLm = null, liveOn = false, liveLastTs = 0, liveFrames = 0, liveFpsT = 0;
 $$("#liveSeg button").forEach((b) => b.addEventListener("click", () => {
-  liveDir = Number(b.dataset.dir);
+  liveMode = b.dataset.mode; resetLiveTracker();
   $$("#liveSeg button").forEach((x) => x.classList.toggle("active", x === b));
 }));
 $("#liveChk").addEventListener("change", (e) => { if (e.target.checked) startLive(); else { if ($("#saveSkel").checked) $("#saveSkel").checked = false; stopLive(); } });
@@ -133,7 +135,8 @@ async function startLive() {
         const ts = Math.max(performance.now(), liveLastTs + 1);
         liveLastTs = ts;
         const res = liveLm.detectForVideo(v, ts);
-        liveLastPose = G.chooseLeadingPose(res.landmarks || [], v.videoWidth, v.videoHeight, liveDir);
+        liveLastPose = G.chooseLeadingPose(res.landmarks || [], v.videoWidth, v.videoHeight, liveTracker.dir);
+        liveTracker.update(liveFrameNo++, liveLastPose, v.videoWidth, v.videoHeight);
         drawLive(liveLastPose, v.videoWidth, v.videoHeight);
         liveFrames++;
         const now = performance.now();
@@ -143,6 +146,10 @@ async function startLive() {
     next(step);
   };
   next(step);
+}
+function resetLiveTracker() {
+  const [d1, d2] = MODES[liveMode];
+  liveTracker = new G.TurnTracker(d1, d2, $("#preview").videoWidth || 1920); liveFrameNo = 0;
 }
 function stopLive() {
   liveOn = false; liveLastPose = null;
@@ -239,6 +246,7 @@ $("#recBtn").onclick = async () => {
       pending = 2;
     } catch (e) { compLoopOn = false; skelRec = null; toast("骨格入り動画を録画できません: " + e.message, 4000); }
   }
+  resetLiveTracker(); // 往復は録画開始から折り返しを追跡
   recorder.start(1000);
   if (skelRec) skelRec.start(1000);
   recStart = Date.now(); keepAwake(true);
@@ -396,14 +404,14 @@ async function createLandmarker() {
 }
 
 // ---------- 解析ダイアログ ----------
-let anaRec = null, anaDir = 1, anaRef = "right", cancelFlag = false, running = false;
+let anaRec = null, anaMode = "r", anaRef = "right", cancelFlag = false, running = false;
 $$("#refSeg button").forEach((b) => b.addEventListener("click", () => {
   anaRef = b.dataset.ref;
   $$("#refSeg button").forEach((x) => x.classList.toggle("active", x === b));
 }));
 $("#anaPerCycle").addEventListener("change", (e) => { $("#refSeg").classList.toggle("hidden", !e.target.checked); $("#refHint").classList.toggle("hidden", !e.target.checked); });
 $$("#anaSeg button").forEach((b) => b.addEventListener("click", () => {
-  anaDir = Number(b.dataset.dir);
+  anaMode = b.dataset.mode;
   $$("#anaSeg button").forEach((x) => x.classList.toggle("active", x === b));
 }));
 async function openAnalyze(rec) {
@@ -450,7 +458,7 @@ $("#anaStart").onclick = async () => {
   $("#anaProgress").classList.remove("hidden");
   keepAwake(true);
   try {
-    const result = await analyze(anaRec, anaDir, fps, $("#anaStick").checked, { perCycle: $("#anaPerCycle").checked, refSide: anaRef }, (i, n, msg) => {
+    const result = await analyze(anaRec, MODES[anaMode], fps, $("#anaStick").checked, { perCycle: $("#anaPerCycle").checked, refSide: anaRef }, (i, n, msg) => {
       $("#anaBar").value = n ? i / n : 0;
       $("#anaText").textContent = msg || `${i} / ${n} フレーム`;
     });
@@ -513,7 +521,8 @@ async function setupEncoder(W, H, fps) {
   };
 }
 
-async function analyze(rec, direction, fps, makeStick, opts, progress) {
+async function analyze(rec, mode, fps, makeStick, opts, progress) {
+  const [direction, dir2] = mode;
   progress(0, 0, "モデルを準備中…");
   const landmarker = await createLandmarker();
   const v = await loadVideoEl(rec.blob, true);
@@ -524,6 +533,7 @@ async function analyze(rec, direction, fps, makeStick, opts, progress) {
   const enc = makeStick ? await setupEncoder(W, H, fps) : null;
   const total = Math.max(1, Math.floor(duration * fps + 1e-6));
   const rows = [];
+  const tracker = new G.TurnTracker(direction, dir2, W);
   const t0 = performance.now();
   try {
     for (let i = 0; i < total; i++) {
@@ -532,9 +542,10 @@ async function analyze(rec, direction, fps, makeStick, opts, progress) {
       ctx.drawImage(v, 0, 0, W, H);
       const ts = Math.round((i * 1000) / fps);
       const res = landmarker.detectForVideo(canvas, ts);
-      const pose = G.chooseLeadingPose(res.landmarks || [], W, H, direction);
+      const pose = G.chooseLeadingPose(res.landmarks || [], W, H, tracker.dir);
+      tracker.update(i, pose, W, H);
       rows.push(G.buildRow(i, fps, ts, W, H, pose));
-      if (enc) { drawOverlay(ctx, pose, W, H, i, fps, direction); await enc.add(canvas, i); }
+      if (enc) { drawOverlay(ctx, pose, W, H, i, fps, tracker.dir); await enc.add(canvas, i); }
       if (i % 3 === 0) {
         const el = (performance.now() - t0) / 1000, rem = (el / (i + 1)) * (total - i - 1);
         progress(i + 1, total, `${i + 1} / ${total} フレーム ・ 残り約 ${Math.ceil(rem)} 秒`);
@@ -546,21 +557,29 @@ async function analyze(rec, direction, fps, makeStick, opts, progress) {
   const stick = enc ? await enc.finish() : null;
 
   let cycleSide = G.chooseCycleSide(rows);
-  let cycleData = null, events = [], warning = "", pc = null;
+  let cycleData = null, events = [], warning = "", pc = null, rt = null;
+  if (dir2 != null) { // 往復
+    if (tracker.turnFrame == null) warning = "折り返しを検出できなかったため、片道として解析しました。";
+    else {
+      rt = G.roundTripSegments(rows, tracker.turnFrame, direction, dir2, fps);
+      if (rt) rows.forEach((r, i) => (r.segment = i < rt.turnStart ? "outbound" : i <= rt.turnEnd ? "turn" : "return"));
+    }
+  }
   if (opts.perCycle) {
-    try { pc = G.perCycleAnalysis(rows, opts.refSide, direction, fps, H); ({ cycleData, events } = pc); cycleSide = opts.refSide; }
-    catch (e) { warning = e.message + "（平均グラフはPython版と同じ方法で作成しました）"; }
+    try { pc = G.perCycleAnalysis(rows, opts.refSide, direction, fps, H, rt ? rt.segments : null); ({ cycleData, events } = pc); cycleSide = opts.refSide; }
+    catch (e) { warning += (warning ? "\n" : "") + e.message + "（平均グラフはPython版と同じ方法で作成しました）"; }
   }
   if (!pc) {
-    try { ({ cycleData, events } = G.normalizedCycles(rows, cycleSide, fps, W)); }
+    try { ({ cycleData, events } = rt ? legacyRoundTrip(rows, cycleSide, fps, W, rt.segments) : G.normalizedCycles(rows, cycleSide, fps, W)); }
     catch (e) { warning += (warning ? "\n" : "") + e.message; }
   }
   if (makeStick && !enc) warning += (warning ? "\n" : "") + "この端末ではスティックピクチャー動画を作成できませんでした（iOS / iPadOS 16.4以降が必要）。";
 
   const base = rec.name.replace(/\.[^.]+$/, "") + "_gait_angles";
   const cols = G.exportColumns();
+  if (rt) cols.splice(5, 0, "segment");
   const csv = new Blob(["﻿" + toCSV(cols, rows)], { type: "text/csv" });
-  const xlsx = buildXlsx(cols, rows, cycleData, events, cycleSide, pc, opts.refSide);
+  const xlsx = buildXlsx(cols, rows, cycleData, events, cycleSide, pc, opts.refSide, rt ? direction : null);
   const png = await canvasBlob(drawGraph(rows, cycleData, events.length, fps));
   let perCycle = null;
   if (pc) {
@@ -576,10 +595,40 @@ async function analyze(rec, direction, fps, makeStick, opts, progress) {
   }
   const detected = rows.filter((r) => r.left_knee_flexion_deg != null || r.right_knee_flexion_deg != null).length;
   return {
-    id: uid(), videoId: rec.id, videoName: rec.name, base, created: Date.now(), direction, fps,
+    id: uid(), videoId: rec.id, videoName: rec.name, base, created: Date.now(), direction, dir2, fps,
+    roundTrip: rt ? { turnFrame: rt.turnFrame, turnStart: rt.turnStart, turnEnd: rt.turnEnd } : null,
     frames: rows.length, width: W, height: H, detected, cycleSide, nCycles: events.length, events, warning,
     csv, xlsx, png, stick, perCycle,
   };
+}
+
+// Python版の周期検出を往路・復路それぞれに適用し、周期数で重み付けして平均
+function legacyRoundTrip(rows, side, fps, W, segments) {
+  const parts = [], errs = [];
+  for (const sg of segments) {
+    try {
+      const r = G.normalizedCycles(rows.slice(sg.a, sg.b + 1), side, fps, W);
+      parts.push({ ...r, sg });
+    } catch (e) { errs.push(`${sg.label}: ${e.message}`); }
+  }
+  if (!parts.length) throw new Error(errs.join("\n"));
+  const total = parts.reduce((t, p) => t + p.events.length, 0);
+  const cycleData = parts[0].cycleData.map((row, p) => {
+    const o = { gait_cycle_percent: p };
+    for (const k of Object.keys(row)) if (k !== "gait_cycle_percent") {
+      let s = 0, w = 0;
+      for (const pt of parts) { const v = pt.cycleData[p][k]; if (Number.isFinite(v)) { s += v * pt.events.length; w += pt.events.length; } }
+      o[k] = w ? s / w : null;
+    }
+    return o;
+  });
+  let n = 0;
+  const events = parts.flatMap((pt) => pt.events.map((e) => ({
+    ...e, cycle: ++n, segment: pt.sg.label,
+    start_contact_frame: e.start_contact_frame + pt.sg.a, start_time_seconds: Math.round(((e.start_contact_frame + pt.sg.a) / fps) * 1000) / 1000,
+    next_contact_frame: e.next_contact_frame + pt.sg.a, next_contact_time_seconds: Math.round(((e.next_contact_frame + pt.sg.a) / fps) * 1000) / 1000,
+  })));
+  return { cycleData, events };
 }
 
 const cell = (v) => (v == null || (typeof v === "number" && !Number.isFinite(v)) ? "" : String(v));
@@ -587,19 +636,22 @@ function toCSV(cols, rows) {
   return [cols.join(","), ...rows.map((r) => cols.map((c) => cell(r[c])).join(","))].join("\r\n") + "\r\n";
 }
 function aoa(cols, objs) { return [cols, ...objs.map((o) => cols.map((c) => (o[c] == null || Number.isNaN(o[c]) ? null : o[c])))]; }
-function buildXlsx(cols, rows, cycleData, events, cycleSide, pc = null, refSide = null) {
+function buildXlsx(cols, rows, cycleData, events, cycleSide, pc = null, refSide = null, rtDir = null) {
   const X = window.XLSX, wb = X.utils.book_new();
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(cols, rows)), "フレーム別角度");
   const ccols = ["gait_cycle_percent", "left_knee_mean_deg", "left_hip_mean_deg", "right_knee_mean_deg", "right_hip_mean_deg"];
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(cycleData ? aoa(ccols, cycleData) : [ccols, ["歩行周期を検出できませんでした"]]), "正規化グラフ用");
   const ecols = ["side", "cycle", "start_contact_frame", "start_time_seconds", "next_contact_frame", "next_contact_time_seconds", "cycle_duration_seconds"];
   if (pc) ecols.push("start_contact");
+  if (rtDir != null) ecols.push("segment");
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(ecols, events)), "推定接地");
   if (pc) {
     X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(G.SUMMARY_COLUMNS, pc.list.map((c) => c.summary))), "周期一覧");
     X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(G.NORM_COLUMNS, pc.list.flatMap((c) => c.norm))), "周期別_正規化");
   }
-  X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([["項目", "説明"], ...G.notesTable(cycleSide, events.length, pc ? refSide : null)]), "説明");
+  const notes = G.notesTable(cycleSide, events.length, pc ? refSide : null);
+  if (rtDir != null) notes.push(["往復", G.roundTripNote(rtDir) + " segment列: outbound=往路, turn=方向転換（除外）, return=復路。"]);
+  X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([["項目", "説明"], ...notes]), "説明");
   const out = X.write(wb, { type: "array", bookType: "xlsx" });
   return new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 }
@@ -700,7 +752,8 @@ async function openResult(id) {
       <tr><td>動画</td><td>${esc(r.videoName)}（${r.width}×${r.height}）</td></tr>
       <tr><td>フレーム数 / fps</td><td>${r.frames} / ${r.fps}</td></tr>
       <tr><td>人物検出フレーム</td><td>${r.detected}（${Math.round((100 * r.detected) / r.frames)}%）</td></tr>
-      <tr><td>追跡対象</td><td>画面上の進行方向（${r.direction > 0 ? "右" : "左"}）に先行する人物</td></tr>
+      <tr><td>追跡対象</td><td>${r.dir2 != null ? `往復（${r.direction > 0 ? "右" : "左"}へ→${r.dir2 > 0 ? "右" : "左"}へ）。進行方向に先行する人物` : `画面上の進行方向（${r.direction > 0 ? "右" : "左"}）に先行する人物`}</td></tr>
+      ${r.roundTrip ? `<tr><td>方向転換（除外）</td><td>${(r.roundTrip.turnStart / r.fps).toFixed(2)}〜${(r.roundTrip.turnEnd / r.fps).toFixed(2)}秒</td></tr>` : ""}
       <tr><td>周期</td><td>${sideJ}側の足・${r.nCycles}周期（接地検出は推定）</td></tr>
     </table>
     ${r.perCycle ? cycleSection(r) : ""}
@@ -723,15 +776,18 @@ const sideJp = (s) => (s === "left" ? "左" : "右");
 const fmt1 = (v) => (v == null ? "-" : Number(v).toFixed(1));
 function cycleSection(r) {
   const pcs = r.perCycle;
+  const segs = [...new Set(pcs.summaries.map((s) => s.segment))].filter((x) => x && x !== "片道");
+  const rtCol = segs.length > 0;
   return `
     <h2>一歩行周期ごとの結果（基準：${sideJp(pcs.refSide)}足）</h2>
     <div class="tblwrap"><table class="cyc">
-      <tr><th>周期</th><th>開始</th><th>時間(秒)</th><th>右膝 最大</th><th>右膝 可動域</th><th>左膝 最大</th><th>左膝 可動域</th><th>右股 可動域</th><th>左股 可動域</th></tr>
-      ${pcs.summaries.map((s) => `<tr><td>${s.cycle}</td><td>${s.start_contact}</td><td>${s.cycle_duration_seconds}</td><td>${fmt1(s.right_knee_max_deg)}</td><td>${fmt1(s.right_knee_range_deg)}</td><td>${fmt1(s.left_knee_max_deg)}</td><td>${fmt1(s.left_knee_range_deg)}</td><td>${fmt1(s.right_hip_range_deg)}</td><td>${fmt1(s.left_hip_range_deg)}</td></tr>`).join("")}
+      <tr><th>周期</th>${rtCol ? "<th>区間</th>" : ""}<th>開始</th><th>時間(秒)</th><th>右膝 最大</th><th>右膝 可動域</th><th>左膝 最大</th><th>左膝 可動域</th><th>右股 可動域</th><th>左股 可動域</th></tr>
+      ${pcs.summaries.map((s) => `<tr><td>${s.cycle}</td>${rtCol ? `<td>${s.segment}</td>` : ""}<td>${s.start_contact}</td><td>${s.cycle_duration_seconds}</td><td>${fmt1(s.right_knee_max_deg)}</td><td>${fmt1(s.right_knee_range_deg)}</td><td>${fmt1(s.left_knee_max_deg)}</td><td>${fmt1(s.left_knee_range_deg)}</td><td>${fmt1(s.right_hip_range_deg)}</td><td>${fmt1(s.left_hip_range_deg)}</td></tr>`).join("")}
     </table></div>
     <div class="row">
       <label>グラフ表示
         <select id="cycleSel"><option value="avg">全${pcs.summaries.length}周期の平均</option>
+          ${segs.map((g) => `<option value="seg:${g}">${g}の平均（${pcs.summaries.filter((s) => s.segment === g).length}周期）</option>`).join("")}
           ${pcs.summaries.map((s, i) => `<option value="${i}">周期${s.cycle}（${s.start_time_seconds}〜${s.end_time_seconds}秒）</option>`).join("")}
         </select>
       </label>
@@ -750,6 +806,12 @@ function bindCycleSection(r, u) {
   const sel = $("#cycleSel"), img = $("#graphImg"), btn = $("#cycleSave");
   sel.onchange = async () => {
     if (sel.value === "avg") { img.src = u(r.png); btn.classList.add("hidden"); return; }
+    if (sel.value.startsWith("seg:")) {
+      const g = sel.value.slice(4), idx = r.perCycle.summaries.map((s, i) => (s.segment === g ? i : -1)).filter((i) => i >= 0);
+      const data = G.meanOfNorms(idx.map((i) => r.perCycle.norms[i]));
+      img.src = u(await canvasBlob(drawGraph(null, data, idx.length, r.fps, { legend: `${g}・${idx.length}周期平均`, title: `${g}の平均（${sideJp(r.perCycle.refSide)}足基準）— 臨床測定ではありません` })));
+      btn.classList.add("hidden"); return;
+    }
     img.src = u(await cycleGraph(r, Number(sel.value))); btn.classList.remove("hidden");
   };
   btn.onclick = async () => {

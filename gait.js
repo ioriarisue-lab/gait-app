@@ -289,13 +289,19 @@ function normalize101(series) {
   return phase.map((p) => interp(p, xp, seg));
 }
 
-export function perCycleAnalysis(rows, refSide, direction, fps, height) {
-  const contacts = heelToeContacts(rows, refSide, direction, fps, height);
-  const cycles = [];
-  for (let k = 0; k < contacts.length - 1; k++) {
-    const a = contacts[k].frame, b = contacts[k + 1].frame, dur = (b - a) / fps;
-    if (dur < 0.5 || dur > 5) continue;
-    cycles.push({ a, b, type: contacts[k].type, nextType: contacts[k + 1].type });
+export function perCycleAnalysis(rows, refSide, direction, fps, height, segments = null) {
+  // segments: [{a, b, dir, label}]（往復のとき）。片道は全体を1区間とする
+  const segs = segments || [{ a: 0, b: rows.length - 1, dir: direction, label: "片道" }];
+  const contacts = [], cycles = [];
+  for (const sg of segs) {
+    const sub = rows.slice(sg.a, sg.b + 1);
+    const cs = heelToeContacts(sub, refSide, sg.dir, fps, height).map((c) => ({ ...c, frame: c.frame + sg.a, segment: sg.label }));
+    contacts.push(...cs);
+    for (let k = 0; k < cs.length - 1; k++) {
+      const a = cs[k].frame, b = cs[k + 1].frame, dur = (b - a) / fps;
+      if (dur < 0.5 || dur > 5) continue;
+      cycles.push({ a, b, type: cs[k].type, nextType: cs[k + 1].type, segment: sg.label });
+    }
   }
   if (!cycles.length) {
     throw new Error(`${refSide === "left" ? "左" : "右"}足を基準にした歩行周期を検出できませんでした。踵とつま先が見える真横からの動画で、基準足が2回以上接地する区間を含めてください。`);
@@ -305,9 +311,9 @@ export function perCycleAnalysis(rows, refSide, direction, fps, height) {
   const r3 = (x) => round(x, 3), r2 = (x) => (Number.isFinite(x) ? round(x, 2) : null);
   const typeJ = (t) => (t === "heel" ? "踵" : "つま先");
   const list = cycles.map((c, idx) => {
-    const norm = Array.from({ length: 101 }, (_, p) => ({ cycle: idx + 1, gait_cycle_percent: p }));
+    const norm = Array.from({ length: 101 }, (_, p) => ({ cycle: idx + 1, segment: c.segment, gait_cycle_percent: p }));
     const summary = {
-      cycle: idx + 1, reference_side: refSide, start_contact: typeJ(c.type),
+      cycle: idx + 1, segment: c.segment, reference_side: refSide, start_contact: typeJ(c.type),
       start_frame: c.a, start_time_seconds: r3(c.a / fps), end_frame: c.b, end_time_seconds: r3(c.b / fps),
       cycle_duration_seconds: r3((c.b - c.a) / fps),
     };
@@ -326,30 +332,79 @@ export function perCycleAnalysis(rows, refSide, direction, fps, height) {
     }
     return { summary, norm, a: c.a, b: c.b };
   });
-  // 全周期の平均（従来の正規化グラフと同じ列名）
-  const cycleData = Array.from({ length: 101 }, (_, p) => {
-    const o = { gait_cycle_percent: p };
-    for (const [s, j] of keys) {
-      const vals = list.map((c) => c.norm[p][`${s}_${j}_deg`]).filter(isNum);
-      o[`${s}_${j}_mean_deg`] = vals.length ? vals.reduce((x, y) => x + y, 0) / vals.length : null;
-    }
-    return o;
-  });
+  const cycleData = meanOfNorms(list.map((c) => c.norm));
   const events = list.map((c) => ({
     side: refSide, cycle: c.summary.cycle, start_contact_frame: c.a, start_time_seconds: c.summary.start_time_seconds,
     next_contact_frame: c.b, next_contact_time_seconds: c.summary.end_time_seconds, cycle_duration_seconds: c.summary.cycle_duration_seconds,
-    start_contact: c.summary.start_contact,
+    start_contact: c.summary.start_contact, segment: c.summary.segment,
   }));
   return { list, cycleData, events, contacts };
 }
 
 export const SUMMARY_COLUMNS = (() => {
-  const c = ["cycle", "reference_side", "start_contact", "start_frame", "start_time_seconds", "end_frame", "end_time_seconds", "cycle_duration_seconds", "detected_frames_percent"];
+  const c = ["cycle", "segment", "reference_side", "start_contact", "start_frame", "start_time_seconds", "end_frame", "end_time_seconds", "cycle_duration_seconds", "detected_frames_percent"];
   for (const s of SIDES) for (const j of ["knee", "hip"]) c.push(`${s}_${j}_max_deg`, `${s}_${j}_min_deg`, `${s}_${j}_range_deg`);
   return c;
 })();
-export const NORM_COLUMNS = ["cycle", "gait_cycle_percent", "left_knee_deg", "left_hip_deg", "right_knee_deg", "right_hip_deg"];
+export const NORM_COLUMNS = ["cycle", "segment", "gait_cycle_percent", "left_knee_deg", "left_hip_deg", "right_knee_deg", "right_hip_deg"];
 
 export function perCycleNote(refSide) {
   return `${refSide === "left" ? "左" : "右"}足を基準足とし、基準足が対側足より前にある区間で最も前に出た時点の踵とつま先の高さを比較。踵が低ければ踵、つま先が低ければつま先の上下座標が最下点（画像の高さの${LOWEST_TOLERANCE_RATIO * 100}%以内）に最初に達したフレームを周期の開始とし、次の開始までを1周期（0〜100%）とした。座標は移動平均で平滑化。`;
+}
+
+// 周期別の正規化データの平均（従来の正規化グラフと同じ列名）
+export function meanOfNorms(norms) {
+  return Array.from({ length: 101 }, (_, p) => {
+    const o = { gait_cycle_percent: p };
+    for (const s of SIDES) for (const j of ["knee", "hip"]) {
+      const vals = norms.map((n) => n[p][`${s}_${j}_deg`]).filter(isNum);
+      o[`${s}_${j}_mean_deg`] = vals.length ? vals.reduce((x, y) => x + y, 0) / vals.length : null;
+    }
+    return o;
+  });
+}
+
+// ---------- 往復歩行 ----------
+// 解析中（オンライン）に折り返しを見つけて、先頭の人物を選ぶ向きを切り替える
+export class TurnTracker {
+  constructor(dir1, dir2, width) { this.dir1 = dir1; this.dir2 = dir2; this.dir = dir1; this.width = width; this.max = -Infinity; this.maxFrame = null; this.turnFrame = null; }
+  update(frame, pose, w, h) {
+    if (this.dir2 == null || this.turnFrame != null || !pose) return;
+    const c = hipCenter(pose, w, h);
+    if (!c) return;
+    const p = c[0] * this.dir1;
+    if (p > this.max) { this.max = p; this.maxFrame = frame; }
+    else if (this.max - p > this.width * 0.05) { this.turnFrame = this.maxFrame; this.dir = this.dir2; }
+  }
+}
+// 折り返し点の前後で、骨盤中心の水平速度が歩行速度の30%未満の区間（＋0.2秒）を方向転換として除外
+export function roundTripSegments(rows, turnFrame, dir1, dir2, fps) {
+  const n = rows.length;
+  const hx = smoothSeries(rows.map((r) => {
+    const a = r._left_hip_x, b = r._right_hip_x;
+    return isNum(a) && isNum(b) ? (a + b) / 2 : isNum(a) ? a : isNum(b) ? b : null;
+  }), fps);
+  if (!hx) return null;
+  const v = hx.map((x, i) => Math.abs((hx[Math.min(n - 1, i + 1)] - hx[Math.max(0, i - 1)]) * fps / 2));
+  const far = v.filter((_, i) => Math.abs(i - turnFrame) > fps);
+  const ref = far.length ? far.slice().sort((a, b) => a - b)[Math.floor(far.length / 2)] : 0;
+  const thr = ref * 0.3, margin = Math.round(fps * 0.2);
+  // 折り返し点に最も近い「遅い」フレームから広げる（折り返し点自体の速度がノイズで高い場合に備える）
+  let c0 = turnFrame;
+  for (let d = 0; d <= Math.round(fps); d++) {
+    if (turnFrame - d >= 0 && v[turnFrame - d] < thr) { c0 = turnFrame - d; break; }
+    if (turnFrame + d < n && v[turnFrame + d] < thr) { c0 = turnFrame + d; break; }
+  }
+  let s = c0, e = c0;
+  while (s > 0 && v[s - 1] < thr) s--;
+  while (e < n - 1 && v[e + 1] < thr) e++;
+  s = Math.max(0, s - margin); e = Math.min(n - 1, e + margin);
+  const segs = [];
+  if (s - 1 >= 1) segs.push({ a: 0, b: s - 1, dir: dir1, label: "往路" });
+  if (e + 1 <= n - 2) segs.push({ a: e + 1, b: n - 1, dir: dir2, label: "復路" });
+  return { segments: segs, turnStart: s, turnEnd: e, turnFrame };
+}
+export function roundTripNote(dir1) {
+  const d = (x) => (x > 0 ? "右" : "左");
+  return `往復（${d(dir1)}へ→${d(-dir1)}へ）。骨盤中心が${d(dir1)}方向に最も進んだ時点を折り返し点とし、その前後で骨盤中心の水平速度が歩行時の中央値の30%未満の区間に前後0.2秒を加えた範囲を方向転換として除外。往路・復路それぞれで歩行周期を検出し、方向転換をまたぐ周期は作らない。複数人が映る場合、往路は${d(dir1)}方向、復路は${d(-dir1)}方向で先頭の人物を追跡。`;
 }

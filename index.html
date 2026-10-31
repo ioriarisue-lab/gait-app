@@ -49,9 +49,11 @@
     <div class="row">
       <label class="chk"><input id="liveChk" type="checkbox" checked> 骨格をリアルタイム表示</label>
       <label class="chk"><input id="saveSkel" type="checkbox"> 骨格入り動画も保存</label>
-      <div class="seg" id="liveSeg">
-        <button data-dir="1" class="active">右へ →</button>
-        <button data-dir="-1">← 左へ</button>
+      <div class="seg wrap" id="liveSeg">
+        <button data-mode="r" class="active">右へ →</button>
+        <button data-mode="l">← 左へ</button>
+        <button data-mode="rl">往復 右→左</button>
+        <button data-mode="lr">往復 左→右</button>
       </div>
     </div>
     <p id="orientWarn" class="warn hidden">縦向きで撮影しています。歩行は横向き（ランドスケープ）で撮ると全身と歩行区間を広く撮れます。</p>
@@ -99,10 +101,12 @@
     <p id="anaName" class="mono"></p>
     <video id="anaPreview" playsinline muted controls></video>
     <div class="row">
-      <span>画面上の進行方向</span>
-      <div class="seg" id="anaSeg">
-        <button data-dir="1" class="active">右へ →</button>
-        <button data-dir="-1">← 左へ</button>
+      <span>画面上の進行方向（往復は最初に進む向き→戻る向き）</span>
+      <div class="seg wrap" id="anaSeg">
+        <button data-mode="r" class="active">右へ →</button>
+        <button data-mode="l">← 左へ</button>
+        <button data-mode="rl">往復 右→左</button>
+        <button data-mode="lr">往復 左→右</button>
       </div>
     </div>
     <div class="row">
