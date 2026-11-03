@@ -56,10 +56,137 @@ export function chooseLeadingPose(poses, w, h, direction) {
   if (!poses || !poses.length) return null;
   let best = null, bestVal = -Infinity;
   poses.forEach((pose, i) => {
-    const c = hipCenter(pose, w, h);
+    const c = hipCenter(pose, w, h) || bodyCenter(pose, w, h);
     if (c && c[0] * direction > bestVal) { bestVal = c[0] * direction; best = i; }
   });
   return best === null ? null : poses[best];
+}
+
+// ---------- 対象者の追跡 ----------
+// 体幹の中心（両肩・両股の平均）。可視性に関係なく推定位置を使う
+export function bodyCenter(pose, w, h) {
+  const ids = [11, 12, 23, 24].filter((i) => pose[i] && Number.isFinite(pose[i].x));
+  if (!ids.length) return null;
+  return [ids.reduce((s, i) => s + pose[i].x * w, 0) / ids.length, ids.reduce((s, i) => s + pose[i].y * h, 0) / ids.length];
+}
+function bodySize(pose, w, h) { // 肩の中点〜足首の中点の距離（px）
+  const m = (a, b) => [((pose[a].x + pose[b].x) / 2) * w, ((pose[a].y + pose[b].y) / 2) * h];
+  const s = m(11, 12), a = m(27, 28);
+  const d = Math.hypot(s[0] - a[0], s[1] - a[1]);
+  return Number.isFinite(d) && d > 1 ? d : h * 0.3;
+}
+function bboxContains(pose, w, h, x, y, pad = 0.1) {
+  const xs = pose.map((p) => p.x * w), ys = pose.map((p) => p.y * h);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const px = (x1 - x0) * pad, py = (y1 - y0) * pad;
+  return x >= x0 - px && x <= x1 + px && y >= y0 - py && y <= y1 + py;
+}
+// 指定した点（タップ位置）の人。骨格の範囲にタップ位置が入っているか、体幹中心のすぐ近くの人だけを選ぶ
+// （その人が検出されていないフレームで、別の人を選ばないため）
+export function choosePoseAtPoint(poses, w, h, x, y) {
+  let best = null, bestD = Infinity;
+  for (const p of poses || []) {
+    const c = bodyCenter(p, w, h);
+    if (!c) continue;
+    const d = Math.hypot(c[0] - x, c[1] - y) / bodySize(p, w, h);
+    const inside = bboxContains(p, w, h, x, y, 0);
+    if (!inside && d > 0.12) continue;
+    const score = d - (inside ? 1 : 0);
+    if (score < bestD) { bestD = score; best = p; }
+  }
+  return best;
+}
+// フレームをまたいで同じ人を追い続ける。見失ったフレームは null（他の人に乗り換えない）。
+// 1秒以上見失ったら、その時点の進行方向で先頭の人を選び直す。
+export class TargetTracker {
+  constructor(w, h, fps) { this.w = w; this.h = h; this.fps = fps; this.state = null; this.seed = null; this.lost = 0; this.reacquired = 0; }
+  seedPoint(x, y) { this.seed = [x, y]; this.state = null; }
+  step(poses, frame, dir) {
+    const w = this.w, h = this.h;
+    poses = poses || [];
+    if (!this.state) {
+      let p = null;
+      if (this.seed) { p = choosePoseAtPoint(poses, w, h, this.seed[0], this.seed[1]); if (p) this.seed = null; }
+      else p = chooseLeadingPose(poses, w, h, dir);
+      if (p) this._set(p, frame, [0, 0]);
+      return p;
+    }
+    // 前回の骨格を移動量だけずらした予測と、各候補の主要関節（肩・股・膝・足首）の平均距離で比べる
+    const st = this.state, df = frame - st.frame || 1, gap = Math.abs(df);
+    const gate = Math.max(0.1 * st.size, 0.02 * w) * (1 + 0.05 * (gap - 1));
+    let best = null, bestD = Infinity;
+    for (const p of poses) {
+      const d = poseDistance(p, st.pose, st.v, df, w, h);
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    if (best && bestD <= gate) {
+      const c = bodyCenter(best, w, h);
+      const v = [0.5 * st.v[0] + 0.5 * ((c[0] - st.c[0]) / df), 0.5 * st.v[1] + 0.5 * ((c[1] - st.c[1]) / df)];
+      this._set(best, frame, v, st.size);
+      return best;
+    }
+    this.lost++;
+    if (gap > this.fps) { // 1秒以上見失った → 選び直し
+      this.state = null;
+      const p = this.step(poses, frame, dir);
+      if (p) this.reacquired++;
+      return p;
+    }
+    return null;
+  }
+  _set(p, frame, v, prevSize) {
+    const size = bodySize(p, this.w, this.h);
+    this.state = { pose: p, c: bodyCenter(p, this.w, this.h), v, frame, size: prevSize ? 0.8 * prevSize + 0.2 * size : size };
+  }
+}
+// 左右ペア（肩・股・膝・足首）。横からの映像では左右の取り違えが起きやすいため、
+// ペアごとに「そのまま」と「左右入れ替え」の近いほうで距離を測る。体幹（肩・股）を重めにする。
+const TRACK_PAIRS = [[11, 12, 2], [23, 24, 2], [25, 26, 1], [27, 28, 1]];
+function poseDistance(p, last, v, df, w, h) {
+  const d = (a, b) => (p[a] && last[b] ? Math.hypot(p[a].x * w - (last[b].x * w + v[0] * df), p[a].y * h - (last[b].y * h + v[1] * df)) : NaN);
+  let s = 0, n = 0;
+  for (const [a, b, wt] of TRACK_PAIRS) {
+    const straight = (d(a, a) + d(b, b)) / 2, swapped = (d(a, b) + d(b, a)) / 2;
+    const m = Math.min(straight, swapped);
+    if (Number.isFinite(m)) { s += m * wt; n += wt; }
+  }
+  return n ? s / n : Infinity;
+}
+// 全フレームの候補から対象者を選ぶ。
+// 指定なし：最初の2秒で人数が最も多いフレームで進行方向の先頭の人を選び、そこから前後両方向に追跡。
+// タップ指定あり：指定フレームでタップ位置に近い人を選び、そこから前後に追跡。
+export function trackAll(cands, w, h, fps, dirAt, seed = null) {
+  const n = cands.length, sel = new Array(n).fill(null);
+  let start;
+  if (seed) start = Math.min(n - 1, Math.max(0, seed.frame));
+  else {
+    start = -1; let most = 0;
+    for (let i = 0; i < Math.min(n, Math.round(fps * 2)); i++) if ((cands[i] || []).length > most) { most = cands[i].length; start = i; }
+    if (start < 0) start = cands.findIndex((c) => c && c.length);
+  }
+  if (start < 0) return { sel, lost: 0, reacquired: 0, seeded: false };
+  const fwd = new TargetTracker(w, h, fps);
+  if (seed) fwd.seedPoint(seed.x * w, seed.y * h);
+  let first = fwd.step(cands[start], start, dirAt(start));
+  for (let k = 1; !first && k < fps && start + 1 < n; k++) { start += 1; first = fwd.step(cands[start], start, dirAt(start)); }
+  sel[start] = first;
+  const bwd = new TargetTracker(w, h, fps);
+  if (fwd.state) bwd.state = { ...fwd.state };
+  for (let i = start + 1; i < n; i++) sel[i] = fwd.step(cands[i], i, dirAt(i));
+  for (let i = start - 1; i >= 0; i--) sel[i] = bwd.step(cands[i], i, dirAt(i));
+  return { sel, lost: fwd.lost + bwd.lost, reacquired: fwd.reacquired + bwd.reacquired, seeded: !!seed };
+}
+// 対象者の骨盤中心が最初の進行方向に最も進んだフレーム（往復の折り返し点）
+export function turnFrameFromSelection(sel, w, h, dir1, fps) {
+  const xs = sel.map((p) => (p ? (hipCenter(p, w, h) || bodyCenter(p, w, h) || [null])[0] : null));
+  const sm = smoothSeries(xs, fps);
+  if (!sm) return null;
+  let best = 0;
+  sm.forEach((x, i) => { if (x * dir1 > sm[best] * dir1) best = i; });
+  // 端の場合は折り返しなし
+  if (best < fps * 0.5 || best > sm.length - 1 - fps * 0.5) return null;
+  const peak = sm[best] * dir1, after = Math.min(...sm.slice(best).map((x) => x * dir1));
+  return peak - after > w * 0.05 ? best : null;
 }
 
 // 出力列（Pythonの行dictのキー順に合わせる）

@@ -61,7 +61,7 @@
       <button id="camBtn" class="btn">カメラ起動</button>
       <button id="recBtn" class="btn rec" disabled>録画開始</button>
     </div>
-    <p class="hint">iPhone・iPadを横向きに固定し、歩行者の全身と足先が画面に入る真横から撮影してください。複数人が映るときは、選んだ進行方向で先頭にいる人の骨格を表示します（「骨格入り動画も保存」をオンにすると、元の動画に加えて骨格入りの動画も保存します。解析には元の動画を使います）。前後に歩行区間を含めると周期を検出しやすくなります。</p>
+    <p class="hint">iPhone・iPadを横向きに固定し、歩行者の全身と足先が画面に入る真横から撮影してください。複数人が映るときは、選んだ進行方向で先頭にいる人を追跡して骨格を表示します。カメラ映像の人をタップすると、その人を追跡します（「骨格入り動画も保存」をオンにすると、元の動画に加えて骨格入りの動画も保存します。解析には元の動画を使います）。前後に歩行区間を含めると周期を検出しやすくなります。</p>
   </section>
 
   <!-- 動画一覧 -->
@@ -119,7 +119,15 @@
   <div class="sheet">
     <h2>解析設定</h2>
     <p id="anaName" class="mono"></p>
-    <video id="anaPreview" playsinline muted controls></video>
+    <div class="pickwrap">
+      <video id="anaPreview" playsinline muted controls></video>
+      <canvas id="pickCanvas"></canvas>
+    </div>
+    <div class="row">
+      <button id="pickBtn" class="btn sub small">対象者をタップで指定</button>
+      <button id="pickClear" class="btn sub small hidden">指定を解除</button>
+      <span id="pickInfo" class="mono">指定なし（進行方向の先頭の人を追跡）</span>
+    </div>
     <div class="row">
       <span>画面上の進行方向（往復は最初に進む向き→戻る向き）</span>
       <div class="seg wrap" id="anaSeg">

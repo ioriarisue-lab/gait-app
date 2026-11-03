@@ -3,7 +3,7 @@ import { Muxer, ArrayBufferTarget } from "./mp4-muxer.mjs";
 import * as G from "./gait.js";
 import { RTMPoseEstimator } from "./rtm.js";
 
-const APP_VERSION = "1.7.0";
+const APP_VERSION = "1.8.0";
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -108,10 +108,20 @@ async function startCamera() {
 
 // ---------- リアルタイム骨格表示 ----------
 const MODES = { r: [1, null], l: [-1, null], rl: [1, -1], lr: [-1, 1] };
-let liveTracker = new G.TurnTracker(1, null, 1), liveMode = "r", liveFrameNo = 0;
+let liveTracker = new G.TurnTracker(1, null, 1), liveMode = "r", liveFrameNo = 0, liveTarget = null;
+function newLiveTarget() { const v = $("#preview"); liveTarget = new G.TargetTracker(v.videoWidth || 1920, v.videoHeight || 1080, 15); }
+$(".camwrap").addEventListener("click", (e) => {
+  if (!liveOn) return;
+  const p = videoPointFromEvent($("#preview"), e);
+  if (!p) return;
+  const v = $("#preview");
+  if (!liveTarget || liveTarget.w !== v.videoWidth) newLiveTarget();
+  liveTarget.seedPoint(p[0] * v.videoWidth, p[1] * v.videoHeight);
+  toast("タップした人を追跡します");
+});
 let liveLastPose = null, liveLm = null, liveOn = false, liveLastTs = 0, liveFrames = 0, liveFpsT = 0;
 $$("#liveSeg button").forEach((b) => b.addEventListener("click", () => {
-  liveMode = b.dataset.mode; resetLiveTracker();
+  liveMode = b.dataset.mode; resetLiveTracker(); newLiveTarget();
   $$("#liveSeg button").forEach((x) => x.classList.toggle("active", x === b));
 }));
 $("#liveChk").addEventListener("change", (e) => { if (e.target.checked) startLive(); else { if ($("#saveSkel").checked) $("#saveSkel").checked = false; stopLive(); } });
@@ -136,7 +146,8 @@ async function startLive() {
         const ts = Math.max(performance.now(), liveLastTs + 1);
         liveLastTs = ts;
         const res = liveLm.detectForVideo(v, ts);
-        liveLastPose = G.chooseLeadingPose(res.landmarks || [], v.videoWidth, v.videoHeight, liveTracker.dir);
+        if (!liveTarget || liveTarget.w !== v.videoWidth || liveTarget.h !== v.videoHeight) newLiveTarget();
+        liveLastPose = liveTarget.step(res.landmarks || [], liveFrameNo, liveTracker.dir);
         liveTracker.update(liveFrameNo++, liveLastPose, v.videoWidth, v.videoHeight);
         drawLive(liveLastPose, v.videoWidth, v.videoHeight);
         liveFrames++;
@@ -451,8 +462,8 @@ async function createLandmarker(engine = "mediapipe") {
   };
   const opts = (delegate) => ({
     baseOptions: { modelAssetBuffer: bytes, delegate },
-    runningMode: "VIDEO", numPoses: 2,
-    minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+    runningMode: "VIDEO", numPoses: 3,
+    minPoseDetectionConfidence: 0.3, minPosePresenceConfidence: 0.3, minTrackingConfidence: 0.5,
   });
   try { return await PoseLandmarker.createFromOptions(fileset, opts("GPU")); }
   catch { return await PoseLandmarker.createFromOptions(fileset, opts("CPU")); }
@@ -467,6 +478,45 @@ $$("#engSeg button").forEach((b) => {
     $$("#engSeg button").forEach((x) => x.classList.toggle("active", x === b));
   });
 });
+let anaSeed = null;
+function videoPointFromEvent(video, e) { // object-fit: contain を考慮して動画内の位置（0〜1）に変換
+  const r = video.getBoundingClientRect(), vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const s = Math.min(r.width / vw, r.height / vh), ox = (r.width - vw * s) / 2, oy = (r.height - vh * s) / 2;
+  const x = (e.clientX - r.left - ox) / (vw * s), y = (e.clientY - r.top - oy) / (vh * s);
+  return x >= 0 && x <= 1 && y >= 0 && y <= 1 ? [x, y] : null;
+}
+function drawPickMarker() {
+  const c = $("#pickCanvas"), v = $("#anaPreview"), r = v.getBoundingClientRect();
+  c.width = r.width; c.height = r.height;
+  const g = c.getContext("2d"); g.clearRect(0, 0, c.width, c.height);
+  if (!anaSeed || !v.videoWidth) return;
+  const s = Math.min(r.width / v.videoWidth, r.height / v.videoHeight), ox = (r.width - v.videoWidth * s) / 2, oy = (r.height - v.videoHeight * s) / 2;
+  const x = ox + anaSeed.x * v.videoWidth * s, y = oy + anaSeed.y * v.videoHeight * s;
+  g.strokeStyle = "#ffb020"; g.lineWidth = 3; g.beginPath(); g.arc(x, y, 18, 0, Math.PI * 2); g.stroke();
+  g.beginPath(); g.moveTo(x - 26, y); g.lineTo(x + 26, y); g.moveTo(x, y - 26); g.lineTo(x, y + 26); g.stroke();
+}
+function setSeed(seed) {
+  anaSeed = seed;
+  $("#pickClear").classList.toggle("hidden", !seed);
+  $("#pickInfo").textContent = seed ? `${seed.t.toFixed(2)}秒の位置でタップした人を追跡` : "指定なし（進行方向の先頭の人を追跡）";
+  drawPickMarker();
+}
+$("#pickBtn").onclick = () => {
+  const c = $("#pickCanvas"), on = !c.classList.contains("active");
+  c.classList.toggle("active", on);
+  $("#pickBtn").textContent = on ? "動画の中の対象者をタップ…" : "対象者をタップで指定";
+  if (on) { $("#anaPreview").pause(); toast("対象者が映っている場面で、その人の胴体をタップしてください"); }
+};
+$("#pickCanvas").addEventListener("click", (e) => {
+  const v = $("#anaPreview"), p = videoPointFromEvent(v, e);
+  if (!p) return;
+  setSeed({ t: v.currentTime, x: p[0], y: p[1] });
+  $("#pickCanvas").classList.remove("active"); $("#pickBtn").textContent = "対象者をタップで指定";
+});
+$("#pickClear").onclick = () => setSeed(null);
+$("#anaPreview").addEventListener("seeked", () => { if (anaSeed && Math.abs($("#anaPreview").currentTime - anaSeed.t) > 0.05) drawPickMarker(); });
+window.addEventListener("resize", () => { if (!$("#analyzeDlg").classList.contains("hidden")) drawPickMarker(); });
 let anaRec = null, anaMode = "r", anaRef = "right", cancelFlag = false, running = false;
 $$("#refSeg button").forEach((b) => b.addEventListener("click", () => {
   anaRef = b.dataset.ref;
@@ -485,6 +535,7 @@ async function openAnalyze(rec) {
   $("#anaProgress").classList.add("hidden");
   $("#anaStart").disabled = false; $("#anaCancel").textContent = "閉じる";
   $("#anaFps").value = rec.fps || 30;
+  setSeed(null); $("#pickCanvas").classList.remove("active"); $("#pickBtn").textContent = "対象者をタップで指定";
   $("#analyzeDlg").classList.remove("hidden");
   if (!rec.fps) estimateFps(rec.blob).then((f) => { if (f && !running) $("#anaFps").value = f; });
 }
@@ -521,7 +572,7 @@ $("#anaStart").onclick = async () => {
   $("#anaProgress").classList.remove("hidden");
   keepAwake(true);
   try {
-    const result = await analyze(anaRec, MODES[anaMode], fps, $("#anaStick").checked, { perCycle: $("#anaPerCycle").checked, refSide: anaRef, engine: anaEngine }, (i, n, msg) => {
+    const result = await analyze(anaRec, MODES[anaMode], fps, $("#anaStick").checked, { perCycle: $("#anaPerCycle").checked, refSide: anaRef, engine: anaEngine, seed: anaSeed }, (i, n, msg) => {
       $("#anaBar").value = n ? i / n : 0;
       $("#anaText").textContent = msg || `${i} / ${n} フレーム`;
     });
@@ -598,36 +649,60 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
   const ctx = canvas.getContext("2d", { willReadFrequently: false });
   const enc = makeStick ? await setupEncoder(W, H, fps) : null;
   const total = Math.max(1, Math.floor(duration * fps + 1e-6));
-  const rows = [];
-  const tracker = new G.TurnTracker(direction, dir2, W);
+  const cands = [];
   const t0 = performance.now();
+  const frameTime = (i) => Math.min((i + 0.5) / fps, Math.max(0, duration - 0.001));
+  let stick = null, track, turnFrame = null, dirAt = () => direction;
   try {
-    for (let i = 0; i < total; i++) {
-      if (cancelFlag) throw new Error("cancel");
-      await seekTo(v, Math.min((i + 0.5) / fps, Math.max(0, duration - 0.001)));
-      ctx.drawImage(v, 0, 0, W, H);
-      const ts = Math.round((i * 1000) / fps);
-      const res = await landmarker.detectForVideo(canvas, ts);
-      const pose = G.chooseLeadingPose(res.landmarks || [], W, H, tracker.dir);
-      tracker.update(i, pose, W, H);
-      rows.push(G.buildRow(i, fps, ts, W, H, pose));
-      if (enc) { drawOverlay(ctx, pose, W, H, i, fps, tracker.dir); await enc.add(canvas, i); }
-      if (i % 3 === 0) {
-        const el = (performance.now() - t0) / 1000, rem = (el / (i + 1)) * (total - i - 1);
-        progress(i + 1, total, `${i + 1} / ${total} フレーム ・ 残り約 ${Math.ceil(rem)} 秒`);
+    // 1回目：全フレームで人物を検出（候補を保存）
+    try {
+      for (let i = 0; i < total; i++) {
+        if (cancelFlag) throw new Error("cancel");
+        await seekTo(v, frameTime(i));
+        ctx.drawImage(v, 0, 0, W, H);
+        const res = await landmarker.detectForVideo(canvas, Math.round((i * 1000) / fps));
+        cands.push((res.landmarks || []).map((p) => p.map((l) => ({ x: l.x, y: l.y, z: l.z || 0, visibility: l.visibility }))));
+        if (i % 3 === 0) {
+          const el = (performance.now() - t0) / 1000, rem = (el / (i + 1)) * (total - i - 1) * (enc ? 1.15 : 1);
+          progress(i + 1, total, `${i + 1} / ${total} フレーム ・ 残り約 ${Math.ceil(rem)} 秒`);
+        }
       }
+    } finally { landmarker.close(); }
+    // 対象者を追跡（タップ指定があればその人、なければ進行方向の先頭の人）
+    const seed = opts.seed ? { frame: Math.round(opts.seed.t * fps), x: opts.seed.x, y: opts.seed.y } : null;
+    track = G.trackAll(cands, W, H, fps, dirAt, seed);
+    if (dir2 != null) {
+      turnFrame = G.turnFrameFromSelection(track.sel, W, H, direction, fps);
+      if (turnFrame != null) { dirAt = (i) => (i <= turnFrame ? direction : dir2); track = G.trackAll(cands, W, H, fps, dirAt, seed); }
+    }
+    // 2回目：スティックピクチャー動画
+    if (enc) {
+      for (let i = 0; i < total; i++) {
+        if (cancelFlag) throw new Error("cancel");
+        await seekTo(v, frameTime(i));
+        ctx.drawImage(v, 0, 0, W, H);
+        drawOverlay(ctx, track.sel[i], W, H, i, fps, dirAt(i));
+        await enc.add(canvas, i);
+        if (i % 5 === 0) progress(i + 1, total, `スティックピクチャー動画を作成中 ${i + 1} / ${total}`);
+      }
+      stick = await enc.finish();
     }
   } catch (e) { enc && enc.abort(); throw e; }
-  finally { landmarker.close(); disposeVideo(v); }
+  finally { disposeVideo(v); }
   progress(total, total, "ファイルを作成中…");
-  const stick = enc ? await enc.finish() : null;
+  const rows = track.sel.map((pose, i) => G.buildRow(i, fps, Math.round((i * 1000) / fps), W, H, pose));
+  const trackInfo = {
+    seeded: track.seeded,
+    missing: track.sel.filter((p, i) => !p && cands[i].length).length,
+    multi: cands.filter((c) => c.length > 1).length,
+  };
 
   let cycleSide = G.chooseCycleSide(rows);
   let cycleData = null, events = [], warning = "", pc = null, rt = null;
   if (dir2 != null) { // 往復
-    if (tracker.turnFrame == null) warning = "折り返しを検出できなかったため、片道として解析しました。";
+    if (turnFrame == null) warning = "折り返しを検出できなかったため、片道として解析しました。";
     else {
-      rt = G.roundTripSegments(rows, tracker.turnFrame, direction, dir2, fps);
+      rt = G.roundTripSegments(rows, turnFrame, direction, dir2, fps);
       if (rt) rows.forEach((r, i) => (r.segment = i < rt.turnStart ? "outbound" : i <= rt.turnEnd ? "turn" : "return"));
     }
   }
@@ -661,7 +736,7 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
   }
   const detected = rows.filter((r) => r.left_knee_flexion_deg != null || r.right_knee_flexion_deg != null).length;
   return {
-    id: uid(), videoId: rec.id, videoName: rec.name, base, created: Date.now(), direction, dir2, fps, engine, backendName,
+    id: uid(), videoId: rec.id, videoName: rec.name, base, created: Date.now(), direction, dir2, fps, engine, backendName, trackInfo,
     roundTrip: rt ? { turnFrame: rt.turnFrame, turnStart: rt.turnStart, turnEnd: rt.turnEnd } : null,
     frames: rows.length, width: W, height: H, detected, cycleSide, nCycles: events.length, events, warning,
     csv, xlsx, png, stick, perCycle,
@@ -716,6 +791,7 @@ function buildXlsx(cols, rows, cycleData, events, cycleSide, pc = null, refSide 
     X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(G.NORM_COLUMNS, pc.list.flatMap((c) => c.norm))), "周期別_正規化");
   }
   const notes = G.notesTable(cycleSide, events.length, pc ? refSide : null);
+  notes.push(["対象者", "最初に選んだ人（タップで指定した人、または進行方向の先頭の人）を、前フレームからの予測位置と主要関節（肩・股・膝・足首）の位置の近さでフレームをまたいで追跡。対象者を確認できないフレームは別の人に乗り換えず空欄とし、1秒以上見失った場合は進行方向の先頭の人を選び直す。"]);
   if (rtDir != null) notes.push(["往復", G.roundTripNote(rtDir) + " segment列: outbound=往路, turn=方向転換（除外）, return=復路。"]);
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([["項目", "説明"], ...notes]), "説明");
   const out = X.write(wb, { type: "array", bookType: "xlsx" });
@@ -819,7 +895,8 @@ async function openResult(id) {
       <tr><td>解析エンジン</td><td>${r.engine === "rtmpose" ? "RTMPose（Halpe26）" : "MediaPipe Pose"}${r.backendName ? `・${r.backendName}` : ""}</td></tr>
       <tr><td>フレーム数 / fps</td><td>${r.frames} / ${r.fps}</td></tr>
       <tr><td>人物検出フレーム</td><td>${r.detected}（${Math.round((100 * r.detected) / r.frames)}%）</td></tr>
-      <tr><td>追跡対象</td><td>${r.dir2 != null ? `往復（${r.direction > 0 ? "右" : "左"}へ→${r.dir2 > 0 ? "右" : "左"}へ）。進行方向に先行する人物` : `画面上の進行方向（${r.direction > 0 ? "右" : "左"}）に先行する人物`}</td></tr>
+      <tr><td>追跡対象</td><td>${r.trackInfo && r.trackInfo.seeded ? "タップで指定した人" : `進行方向（${r.direction > 0 ? "右" : "左"}${r.dir2 != null ? `→${r.dir2 > 0 ? "右" : "左"}の往復` : ""}）の先頭の人`}${r.trackInfo ? "（フレームをまたいで同じ人を追跡）" : ""}</td></tr>
+      ${r.trackInfo ? `<tr><td>追跡</td><td>複数人が映ったフレーム ${r.trackInfo.multi}・対象者を確認できず空欄にしたフレーム ${r.trackInfo.missing}</td></tr>` : ""}
       ${r.roundTrip ? `<tr><td>方向転換（除外）</td><td>${(r.roundTrip.turnStart / r.fps).toFixed(2)}〜${(r.roundTrip.turnEnd / r.fps).toFixed(2)}秒</td></tr>` : ""}
       <tr><td>周期</td><td>${sideJ}側の足・${r.nCycles}周期（接地検出は推定）</td></tr>
     </table>
