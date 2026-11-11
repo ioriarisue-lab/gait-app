@@ -54,6 +54,13 @@ table.cyc th { color:var(--sub); font-weight:600; background:#f4f6f5; }
 .pickwrap { position:relative; }
 #pickCanvas { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
 #pickCanvas.active { pointer-events:auto; cursor:crosshair; outline:3px solid #ffb020; border-radius:8px; }
+h3.sub { font-size:15px; margin:16px 0 4px; color:var(--sub); }
+.rangebar { position:relative; height:14px; background:#e3e8e7; border-radius:7px; margin:6px 0; overflow:hidden; }
+.rangebar .sel { position:absolute; top:0; bottom:0; background:var(--main); opacity:.75; }
+.rangebar .cur { position:absolute; top:-2px; bottom:-2px; width:3px; background:#ffb020; }
+.rangerow { gap:8px; flex-wrap:nowrap; margin:6px 0; }
+.rangerow input { width:110px !important; min-width:0 !important; flex:none; }
+.rangerow .rl { color:var(--sub); font-size:15px; }
 .hidden { display:none !important; }
 .toast { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 24px); transform:translateX(-50%); background:#222; color:#fff; padding:12px 20px; border-radius:10px; z-index:30; max-width:90vw; font-size:15px; }
 #resultView { background:#fff; border-radius:12px; padding:16px; margin-bottom:16px; }

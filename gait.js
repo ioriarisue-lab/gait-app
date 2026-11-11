@@ -546,3 +546,49 @@ export function roundTripNote(dir1) {
   const d = (x) => (x > 0 ? "右" : "左");
   return `往復（${d(dir1)}へ→${d(-dir1)}へ）。骨盤中心が${d(dir1)}方向に最も進んだ時点を折り返し点とし、その前後で骨盤中心の水平速度が歩行時の中央値の30%未満の区間に前後0.2秒を加えた範囲を方向転換として除外。往路・復路それぞれで歩行周期を検出し、方向転換をまたぐ周期は作らない。複数人が映る場合、往路は${d(dir1)}方向、復路は${d(-dir1)}方向で先頭の人物を追跡。`;
 }
+
+// ---------- 光刺激の検出 ----------
+// 指定した範囲の平均輝度（0〜255）から、光が点いた瞬間（立ち上がり）を検出する。
+// 基準（消灯）＝下位10%の値、振幅＝最大値−基準。振幅が12未満なら光なしとみなす。
+// 50%を超えたら点灯、30%を下回ったら消灯（ヒステリシス）。点灯の開始は、立ち上がりをさかのぼって
+// 「基準＋max(振幅の15%, 消灯時のばらつき×3)」を最初に超えたフレームとする。
+export function detectLightEvents(vals, fps, f0 = 0) {
+  const n = vals.length;
+  if (!n) return { events: [], on: [], info: null };
+  const sorted = vals.slice().sort((a, b) => a - b);
+  const base = sorted[Math.floor(n * 0.1)], peak = sorted[n - 1], amp = peak - base;
+  const offVals = vals.filter((v) => v <= base + amp * 0.2);
+  const mean = offVals.reduce((s, v) => s + v, 0) / Math.max(1, offVals.length);
+  const sd = Math.sqrt(offVals.reduce((s, v) => s + (v - mean) ** 2, 0) / Math.max(1, offVals.length));
+  const info = { base: round(base, 1), peak: round(peak, 1), amplitude: round(amp, 1) };
+  const on = new Array(n).fill(0);
+  if (amp < 12) return { events: [], on, info: { ...info, note: "明るさの変化が小さく、光刺激を検出できませんでした" } };
+  const thrOn = base + amp * 0.5, thrOff = base + amp * 0.3, thrStart = base + Math.max(amp * 0.15, sd * 3);
+  const events = [];
+  let state = false, cur = null;
+  for (let i = 0; i < n; i++) {
+    if (!state && vals[i] >= thrOn) {
+      let s = i;
+      while (s > 0 && vals[s - 1] >= thrStart && (events.length === 0 || s - 1 > events[events.length - 1]._off)) s--;
+      cur = { _on: s, _peak: vals[i] }; state = true;
+    } else if (state) {
+      cur._peak = Math.max(cur._peak, vals[i]);
+      if (vals[i] < thrOff) { cur._off = i; events.push(cur); state = false; cur = null; }
+    }
+  }
+  if (state) { cur._off = null; events.push(cur); }
+  const r3 = (x) => round(x, 3);
+  const out = events.map((e, k) => {
+    const endIdx = e._off == null ? n : e._off;
+    for (let i = e._on; i < endIdx; i++) on[i] = 1;
+    const onF = e._on + f0, offF = e._off == null ? null : e._off + f0;
+    return {
+      event: k + 1, onset_frame: onF, onset_time_seconds: r3(onF / fps),
+      offset_frame: offF, offset_time_seconds: offF == null ? null : r3(offF / fps),
+      duration_seconds: offF == null ? null : r3((offF - onF) / fps), peak_brightness: round(e._peak, 1),
+    };
+  });
+  return { events: out, on, info: { ...info, threshold_on: round(thrOn, 1), threshold_start: round(thrStart, 1) } };
+}
+export const LIGHT_COLUMNS = ["event", "onset_frame", "onset_time_seconds", "offset_frame", "offset_time_seconds", "duration_seconds", "peak_brightness"];
+export const LIGHT_NOTE = "指定した範囲の平均輝度（0.299R+0.587G+0.114B、0〜255）をフレームごとに計算。下位10%の値を消灯時の基準、最大値との差を振幅とし、振幅の50%を超えたら点灯と判定（30%を下回ったら消灯）。点灯の開始フレームは、立ち上がりをさかのぼって基準＋max(振幅の15%, 消灯時のばらつき×3)を最初に超えたフレーム。時刻の精度は1フレーム（30fpsで約33ms、60fpsで約17ms）。";

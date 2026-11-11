@@ -1,5 +1,5 @@
 // オフライン用キャッシュ（ファイルを更新したら VERSION を変える）
-const VERSION = "gait-v1.8.0";
+const VERSION = "gait-v1.10.0";
 const ASSETS = [
   "./", "index.html", "style.css", "app.js", "gait.js", "vision_bundle.mjs", "mp4-muxer.mjs",
   "xlsx.mini.min.js", "manifest.webmanifest", "icon-180.png", "icon-192.png", "icon-512.png",

@@ -128,6 +128,27 @@
       <button id="pickClear" class="btn sub small hidden">指定を解除</button>
       <span id="pickInfo" class="mono">指定なし（進行方向の先頭の人を追跡）</span>
     </div>
+    <h3 class="sub">光刺激の検出</h3>
+    <div class="row">
+      <label class="chk"><input id="lightChk" type="checkbox"> 光が点いた瞬間を検出する</label>
+      <button id="lightBtn" class="btn sub small">光の位置を囲む</button>
+    </div>
+    <p id="lightInfo" class="hint">動画を止めて、光（ランプ）が映る場所を指でなぞって四角で囲んでください。</p>
+    <h3 class="sub">解析する区間</h3>
+    <div class="rangebar" id="rangeBar"><span class="sel" id="rangeSel"></span><span class="cur" id="rangeCur"></span></div>
+    <div class="row rangerow">
+      <span class="rl">開始</span><input id="rangeStart" type="number" step="0.01" min="0" inputmode="decimal"><span class="rl">秒</span>
+      <button id="setStart" class="btn sub small">今の位置を開始に</button>
+    </div>
+    <div class="row rangerow">
+      <span class="rl">終了</span><input id="rangeEnd" type="number" step="0.01" min="0" inputmode="decimal"><span class="rl">秒</span>
+      <button id="setEnd" class="btn sub small">今の位置を終了に</button>
+    </div>
+    <div class="row">
+      <button id="rangePlay" class="btn sub small">区間を再生</button>
+      <button id="rangeAll" class="btn sub small">全体に戻す</button>
+      <span id="rangeInfo" class="mono"></span>
+    </div>
     <div class="row">
       <span>画面上の進行方向（往復は最初に進む向き→戻る向き）</span>
       <div class="seg wrap" id="anaSeg">

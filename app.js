@@ -3,7 +3,7 @@ import { Muxer, ArrayBufferTarget } from "./mp4-muxer.mjs";
 import * as G from "./gait.js";
 import { RTMPoseEstimator } from "./rtm.js";
 
-const APP_VERSION = "1.8.0";
+const APP_VERSION = "1.10.0";
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -490,8 +490,16 @@ function drawPickMarker() {
   const c = $("#pickCanvas"), v = $("#anaPreview"), r = v.getBoundingClientRect();
   c.width = r.width; c.height = r.height;
   const g = c.getContext("2d"); g.clearRect(0, 0, c.width, c.height);
-  if (!anaSeed || !v.videoWidth) return;
+  if (!v.videoWidth) return;
   const s = Math.min(r.width / v.videoWidth, r.height / v.videoHeight), ox = (r.width - v.videoWidth * s) / 2, oy = (r.height - v.videoHeight * s) / 2;
+  const box = lightDrag || anaLight;
+  if (box) {
+    const X = (u) => ox + u * v.videoWidth * s, Y = (u) => oy + u * v.videoHeight * s;
+    g.strokeStyle = "#ffe000"; g.lineWidth = 3; g.setLineDash([6, 4]);
+    g.strokeRect(X(Math.min(box.x0, box.x1)), Y(Math.min(box.y0, box.y1)), Math.abs(X(box.x1) - X(box.x0)), Math.abs(Y(box.y1) - Y(box.y0)));
+    g.setLineDash([]); g.fillStyle = "#ffe000"; g.font = "bold 14px sans-serif"; g.fillText("光", X(Math.min(box.x0, box.x1)), Y(Math.min(box.y0, box.y1)) - 4);
+  }
+  if (!anaSeed) return;
   const x = ox + anaSeed.x * v.videoWidth * s, y = oy + anaSeed.y * v.videoHeight * s;
   g.strokeStyle = "#ffb020"; g.lineWidth = 3; g.beginPath(); g.arc(x, y, 18, 0, Math.PI * 2); g.stroke();
   g.beginPath(); g.moveTo(x - 26, y); g.lineTo(x + 26, y); g.moveTo(x, y - 26); g.lineTo(x, y + 26); g.stroke();
@@ -506,9 +514,50 @@ $("#pickBtn").onclick = () => {
   const c = $("#pickCanvas"), on = !c.classList.contains("active");
   c.classList.toggle("active", on);
   $("#pickBtn").textContent = on ? "動画の中の対象者をタップ…" : "対象者をタップで指定";
-  if (on) { $("#anaPreview").pause(); toast("対象者が映っている場面で、その人の胴体をタップしてください"); }
+  if (on) { pickMode = "person"; $("#anaPreview").pause(); toast("対象者が映っている場面で、その人の胴体をタップしてください"); }
 };
+// ---------- 光刺激の範囲指定（ドラッグで四角を描く） ----------
+let pickMode = "person", anaLight = null, lightDrag = null;
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+function videoPointLoose(video, e) {
+  const r = video.getBoundingClientRect(), vw = video.videoWidth, vh = video.videoHeight;
+  const s = Math.min(r.width / vw, r.height / vh), ox = (r.width - vw * s) / 2, oy = (r.height - vh * s) / 2;
+  return [clamp01((e.clientX - r.left - ox) / (vw * s)), clamp01((e.clientY - r.top - oy) / (vh * s))];
+}
+function setLight(roi, save = true) {
+  anaLight = roi;
+  if (roi && save) { lsSet("lightRoi", JSON.stringify(roi)); if (anaRec) { anaRec.lightRoi = roi; dbPut("videos", anaRec); } }
+  $("#lightInfo").textContent = roi ? "黄色の四角の中の明るさで判定します。光が四角からはみ出さないように、少し大きめに囲んでください。" : "動画を止めて、光（ランプ）が映る場所を指でなぞって四角で囲んでください。";
+  drawPickMarker();
+}
+$("#lightBtn").onclick = () => {
+  const c = $("#pickCanvas");
+  pickMode = "light"; c.classList.add("active"); $("#anaPreview").pause();
+  $("#lightChk").checked = true;
+  toast("光が映る場所を指でなぞって囲んでください");
+};
+$("#pickCanvas").addEventListener("pointerdown", (e) => {
+  if (pickMode !== "light") return;
+  e.preventDefault(); $("#pickCanvas").setPointerCapture(e.pointerId);
+  const [x, y] = videoPointLoose($("#anaPreview"), e); lightDrag = { x0: x, y0: y, x1: x, y1: y }; drawPickMarker();
+});
+$("#pickCanvas").addEventListener("pointermove", (e) => {
+  if (pickMode !== "light" || !lightDrag) return;
+  const [x, y] = videoPointLoose($("#anaPreview"), e); lightDrag.x1 = x; lightDrag.y1 = y; drawPickMarker();
+});
+$("#pickCanvas").addEventListener("pointerup", () => {
+  if (pickMode !== "light" || !lightDrag) return;
+  let { x0, y0, x1, y1 } = lightDrag; lightDrag = null;
+  const v = $("#anaPreview"), minW = 12 / v.videoWidth, minH = 12 / v.videoHeight;
+  if (Math.abs(x1 - x0) < minW || Math.abs(y1 - y0) < minH) { // タップだけなら小さな四角
+    const cx = x0, cy = y0, hw = 0.03, hh = 0.03 * (v.videoWidth / v.videoHeight);
+    x0 = clamp01(cx - hw); x1 = clamp01(cx + hw); y0 = clamp01(cy - hh); y1 = clamp01(cy + hh);
+  }
+  setLight({ x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) });
+  pickMode = "person"; $("#pickCanvas").classList.remove("active");
+});
 $("#pickCanvas").addEventListener("click", (e) => {
+  if (pickMode !== "person") return;
   const v = $("#anaPreview"), p = videoPointFromEvent(v, e);
   if (!p) return;
   setSeed({ t: v.currentTime, x: p[0], y: p[1] });
@@ -517,6 +566,42 @@ $("#pickCanvas").addEventListener("click", (e) => {
 $("#pickClear").onclick = () => setSeed(null);
 $("#anaPreview").addEventListener("seeked", () => { if (anaSeed && Math.abs($("#anaPreview").currentTime - anaSeed.t) > 0.05) drawPickMarker(); });
 window.addEventListener("resize", () => { if (!$("#analyzeDlg").classList.contains("hidden")) drawPickMarker(); });
+// ---------- 解析区間 ----------
+const pvDur = () => { const d = $("#anaPreview").duration; return Number.isFinite(d) ? d : 0; };
+function getRange() {
+  const d = pvDur(), s = parseFloat($("#rangeStart").value), e = parseFloat($("#rangeEnd").value);
+  const start = Number.isFinite(s) ? Math.max(0, Math.min(s, d)) : 0, end = Number.isFinite(e) ? Math.max(0, Math.min(e, d)) : d;
+  if (start <= 0.001 && end >= d - 0.001) return null; // 全体
+  return { start, end };
+}
+function updateRangeUI() {
+  const d = pvDur(); if (!d) return;
+  const r = getRange() || { start: 0, end: d }, fps = Number($("#anaFps").value) || 30;
+  $("#rangeSel").style.left = `${(100 * r.start) / d}%`;
+  $("#rangeSel").style.width = `${(100 * Math.max(0, r.end - r.start)) / d}%`;
+  const len = r.end - r.start;
+  $("#rangeInfo").textContent = len < 0.5 ? "⚠ 区間が短すぎます（終了を開始より後に）" : `${getRange() ? "" : "全体："}${r.start.toFixed(2)}〜${r.end.toFixed(2)}秒（${len.toFixed(2)}秒・約${Math.round(len * fps)}フレーム）`;
+}
+function setRangeInputs(start, end) {
+  $("#rangeStart").value = start.toFixed(2); $("#rangeEnd").value = end.toFixed(2); updateRangeUI();
+}
+["#rangeStart", "#rangeEnd", "#anaFps"].forEach((s) => $(s).addEventListener("input", updateRangeUI));
+$("#setStart").onclick = () => { const t = $("#anaPreview").currentTime, e = parseFloat($("#rangeEnd").value); setRangeInputs(t, Number.isFinite(e) && e > t ? e : pvDur()); };
+$("#setEnd").onclick = () => { const t = $("#anaPreview").currentTime, s = parseFloat($("#rangeStart").value); setRangeInputs(Number.isFinite(s) && s < t ? s : 0, t); };
+$("#rangeAll").onclick = () => setRangeInputs(0, pvDur());
+let rangeStop = null;
+$("#rangePlay").onclick = () => {
+  const v = $("#anaPreview"), r = getRange() || { start: 0, end: pvDur() };
+  v.currentTime = r.start; v.play().catch(() => {});
+  if (rangeStop) v.removeEventListener("timeupdate", rangeStop);
+  rangeStop = () => { if (v.currentTime >= r.end) { v.pause(); v.removeEventListener("timeupdate", rangeStop); rangeStop = null; } };
+  v.addEventListener("timeupdate", rangeStop);
+};
+$("#anaPreview").addEventListener("timeupdate", () => { const d = pvDur(); if (d) $("#rangeCur").style.left = `${(100 * $("#anaPreview").currentTime) / d}%`; });
+$("#anaPreview").addEventListener("loadedmetadata", () => setRangeInputs(0, pvDur()));
+$("#rangeBar").addEventListener("click", (e) => { // バーをタップしてその位置へ移動
+  const r = $("#rangeBar").getBoundingClientRect(); $("#anaPreview").currentTime = ((e.clientX - r.left) / r.width) * pvDur();
+});
 let anaRec = null, anaMode = "r", anaRef = "right", cancelFlag = false, running = false;
 $$("#refSeg button").forEach((b) => b.addEventListener("click", () => {
   anaRef = b.dataset.ref;
@@ -535,7 +620,12 @@ async function openAnalyze(rec) {
   $("#anaProgress").classList.add("hidden");
   $("#anaStart").disabled = false; $("#anaCancel").textContent = "閉じる";
   $("#anaFps").value = rec.fps || 30;
-  setSeed(null); $("#pickCanvas").classList.remove("active"); $("#pickBtn").textContent = "対象者をタップで指定";
+  setSeed(null); $("#pickCanvas").classList.remove("active"); $("#pickBtn").textContent = "対象者をタップで指定"; pickMode = "person";
+  let roi = rec.lightRoi || null;
+  const had = !!roi;
+  if (!roi) try { roi = JSON.parse(lsGet("lightRoi", "null")); } catch {}
+  setLight(roi, false);
+  $("#lightChk").checked = had;
   $("#analyzeDlg").classList.remove("hidden");
   if (!rec.fps) estimateFps(rec.blob).then((f) => { if (f && !running) $("#anaFps").value = f; });
 }
@@ -567,12 +657,16 @@ $("#anaStart").onclick = async () => {
   const fps = Number($("#anaFps").value);
   if (!(fps > 0)) { toast("フレームレートを入力してください"); return; }
   $("#anaPreview").pause();
+  const rg = getRange() || { start: 0, end: pvDur() };
+  if (rg.end - rg.start < 0.5) { toast("解析する区間が短すぎます"); return; }
+  if ($("#lightChk").checked && !anaLight) { toast("「光の位置を囲む」で光が映る場所を囲んでください"); return; }
+  if (anaSeed && (anaSeed.t < rg.start - 0.05 || anaSeed.t > rg.end + 0.05)) { toast("対象者をタップした場面が解析区間の外です。区間内でタップし直してください"); return; }
   running = true; cancelFlag = false;
   $("#anaStart").disabled = true; $("#anaCancel").textContent = "中止";
   $("#anaProgress").classList.remove("hidden");
   keepAwake(true);
   try {
-    const result = await analyze(anaRec, MODES[anaMode], fps, $("#anaStick").checked, { perCycle: $("#anaPerCycle").checked, refSide: anaRef, engine: anaEngine, seed: anaSeed }, (i, n, msg) => {
+    const result = await analyze(anaRec, MODES[anaMode], fps, $("#anaStick").checked, { perCycle: $("#anaPerCycle").checked, refSide: anaRef, engine: anaEngine, seed: anaSeed, range: getRange(), light: $("#lightChk").checked && anaLight ? anaLight : null }, (i, n, msg) => {
       $("#anaBar").value = n ? i / n : 0;
       $("#anaText").textContent = msg || `${i} / ${n} フレーム`;
     });
@@ -601,6 +695,14 @@ function drawOverlay(ctx, pose, W, H, frameIndex, fps, direction) {
   ctx.fillText(label, 24, 36);
 }
 
+function drawLightBox(ctx, lr, on) {
+  ctx.lineWidth = 3; ctx.strokeStyle = on ? "#ffe000" : "rgba(255,224,0,0.6)";
+  ctx.strokeRect(lr.x, lr.y, lr.w, lr.h);
+  if (on) {
+    ctx.fillStyle = "#ffe000"; ctx.font = "bold 26px -apple-system, Helvetica, sans-serif"; ctx.textBaseline = "bottom";
+    ctx.fillText("LIGHT ON", lr.x, Math.max(28, lr.y - 4));
+  }
+}
 async function setupEncoder(W, H, fps) {
   if (!("VideoEncoder" in window)) return null;
   const ew = W - (W % 2), eh = H - (H % 2);
@@ -646,21 +748,35 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
   try { await v.play(); v.pause(); } catch {}
   const W = v.videoWidth, H = v.videoHeight, duration = v.duration;
   const canvas = document.createElement("canvas"); canvas.width = W; canvas.height = H;
-  const ctx = canvas.getContext("2d", { willReadFrequently: false });
+  const ctx = canvas.getContext("2d", { willReadFrequently: !!opts.light });
+  const lightVals = [];
+  const lr = opts.light ? (() => {
+    const x = Math.floor(opts.light.x0 * W), y = Math.floor(opts.light.y0 * H);
+    return { x, y, w: Math.max(1, Math.ceil(opts.light.x1 * W) - x), h: Math.max(1, Math.ceil(opts.light.y1 * H) - y) };
+  })() : null;
   const enc = makeStick ? await setupEncoder(W, H, fps) : null;
-  const total = Math.max(1, Math.floor(duration * fps + 1e-6));
+  const totalAll = Math.max(1, Math.floor(duration * fps + 1e-6));
+  // 解析区間（指定がなければ全体）。f0〜f1 を解析し、配列の添字は区間の先頭を0とする
+  const f0 = Math.min(totalAll - 1, Math.max(0, Math.round(((opts.range && opts.range.start) || 0) * fps)));
+  const f1 = Math.max(f0, Math.min(totalAll - 1, opts.range && opts.range.end != null ? Math.round(opts.range.end * fps) - 1 : totalAll - 1));
+  const total = f1 - f0 + 1;
   const cands = [];
   const t0 = performance.now();
   const frameTime = (i) => Math.min((i + 0.5) / fps, Math.max(0, duration - 0.001));
-  let stick = null, track, turnFrame = null, dirAt = () => direction;
+  let stick = null, track, turnFrame = null, dirAt = () => direction, light = null;
   try {
     // 1回目：全フレームで人物を検出（候補を保存）
     try {
       for (let i = 0; i < total; i++) {
         if (cancelFlag) throw new Error("cancel");
-        await seekTo(v, frameTime(i));
+        await seekTo(v, frameTime(f0 + i));
         ctx.drawImage(v, 0, 0, W, H);
-        const res = await landmarker.detectForVideo(canvas, Math.round((i * 1000) / fps));
+        if (lr) { // 光の範囲の平均輝度
+          const d = ctx.getImageData(lr.x, lr.y, lr.w, lr.h).data;
+          let sum = 0; for (let k = 0; k < d.length; k += 4) sum += 0.299 * d[k] + 0.587 * d[k + 1] + 0.114 * d[k + 2];
+          lightVals.push(sum / (d.length / 4));
+        }
+        const res = await landmarker.detectForVideo(canvas, Math.round(((f0 + i) * 1000) / fps));
         cands.push((res.landmarks || []).map((p) => p.map((l) => ({ x: l.x, y: l.y, z: l.z || 0, visibility: l.visibility }))));
         if (i % 3 === 0) {
           const el = (performance.now() - t0) / 1000, rem = (el / (i + 1)) * (total - i - 1) * (enc ? 1.15 : 1);
@@ -669,19 +785,21 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
       }
     } finally { landmarker.close(); }
     // 対象者を追跡（タップ指定があればその人、なければ進行方向の先頭の人）
-    const seed = opts.seed ? { frame: Math.round(opts.seed.t * fps), x: opts.seed.x, y: opts.seed.y } : null;
+    const seed = opts.seed ? { frame: Math.min(total - 1, Math.max(0, Math.round(opts.seed.t * fps) - f0)), x: opts.seed.x, y: opts.seed.y } : null;
     track = G.trackAll(cands, W, H, fps, dirAt, seed);
     if (dir2 != null) {
       turnFrame = G.turnFrameFromSelection(track.sel, W, H, direction, fps);
       if (turnFrame != null) { dirAt = (i) => (i <= turnFrame ? direction : dir2); track = G.trackAll(cands, W, H, fps, dirAt, seed); }
     }
+    if (lr) light = G.detectLightEvents(lightVals, fps, f0);
     // 2回目：スティックピクチャー動画
     if (enc) {
       for (let i = 0; i < total; i++) {
         if (cancelFlag) throw new Error("cancel");
-        await seekTo(v, frameTime(i));
+        await seekTo(v, frameTime(f0 + i));
         ctx.drawImage(v, 0, 0, W, H);
-        drawOverlay(ctx, track.sel[i], W, H, i, fps, dirAt(i));
+        drawOverlay(ctx, track.sel[i], W, H, f0 + i, fps, dirAt(i));
+        if (lr && light) drawLightBox(ctx, lr, light.on[i]);
         await enc.add(canvas, i);
         if (i % 5 === 0) progress(i + 1, total, `スティックピクチャー動画を作成中 ${i + 1} / ${total}`);
       }
@@ -690,7 +808,9 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
   } catch (e) { enc && enc.abort(); throw e; }
   finally { disposeVideo(v); }
   progress(total, total, "ファイルを作成中…");
-  const rows = track.sel.map((pose, i) => G.buildRow(i, fps, Math.round((i * 1000) / fps), W, H, pose));
+  // frame・time_seconds は元の動画の通し番号・時刻
+  const rows = track.sel.map((pose, i) => G.buildRow(f0 + i, fps, Math.round(((f0 + i) * 1000) / fps), W, H, pose));
+  if (light) rows.forEach((r, i) => { r.light_brightness = Math.round(lightVals[i] * 10) / 10; r.light_on = light.on[i]; });
   const trackInfo = {
     seeded: track.seeded,
     missing: track.sel.filter((p, i) => !p && cands[i].length).length,
@@ -714,13 +834,29 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
     try { ({ cycleData, events } = rt ? legacyRoundTrip(rows, cycleSide, fps, W, rt.segments) : G.normalizedCycles(rows, cycleSide, fps, W)); }
     catch (e) { warning += (warning ? "\n" : "") + e.message; }
   }
+  // 周期・接地の番号を元の動画の通し番号・時刻にそろえる
+  if (f0 > 0) {
+    const r3 = (x) => Math.round(x * 1000) / 1000, sh = (f) => f + f0;
+    for (const e of events) {
+      e.start_contact_frame = sh(e.start_contact_frame); e.start_time_seconds = r3(e.start_contact_frame / fps);
+      e.next_contact_frame = sh(e.next_contact_frame); e.next_contact_time_seconds = r3(e.next_contact_frame / fps);
+    }
+    if (pc) for (const c of pc.list) {
+      const s = c.summary;
+      s.start_frame = sh(s.start_frame); s.start_time_seconds = r3(s.start_frame / fps);
+      s.end_frame = sh(s.end_frame); s.end_time_seconds = r3(s.end_frame / fps);
+    }
+  }
+  const range = { start: f0 / fps, end: (f1 + 1) / fps, whole: f0 === 0 && f1 === totalAll - 1 };
   if (makeStick && !enc) warning += (warning ? "\n" : "") + "この端末ではスティックピクチャー動画を作成できませんでした（iOS / iPadOS 16.4以降が必要）。";
 
   const base = rec.name.replace(/\.[^.]+$/, "") + (engine === "rtmpose" ? "_rtmpose" : "") + "_gait_angles";
   const cols = G.exportColumns();
   if (rt) cols.splice(5, 0, "segment");
+  if (light) cols.splice(5, 0, "light_brightness", "light_on");
   const csv = new Blob(["﻿" + toCSV(cols, rows)], { type: "text/csv" });
-  const xlsx = buildXlsx(cols, rows, cycleData, events, cycleSide, pc, opts.refSide, rt ? direction : null);
+  const xlsx = buildXlsx(cols, rows, cycleData, events, cycleSide, pc, opts.refSide, rt ? direction : null, range, light);
+  const lightCsv = light ? new Blob(["\ufeff" + toCSV(G.LIGHT_COLUMNS, light.events)], { type: "text/csv" }) : null;
   const png = await canvasBlob(drawGraph(rows, cycleData, events.length, fps));
   let perCycle = null;
   if (pc) {
@@ -737,9 +873,10 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
   const detected = rows.filter((r) => r.left_knee_flexion_deg != null || r.right_knee_flexion_deg != null).length;
   return {
     id: uid(), videoId: rec.id, videoName: rec.name, base, created: Date.now(), direction, dir2, fps, engine, backendName, trackInfo,
-    roundTrip: rt ? { turnFrame: rt.turnFrame, turnStart: rt.turnStart, turnEnd: rt.turnEnd } : null,
+    roundTrip: rt ? { turnFrame: rt.turnFrame + f0, turnStart: rt.turnStart + f0, turnEnd: rt.turnEnd + f0 } : null, range,
     frames: rows.length, width: W, height: H, detected, cycleSide, nCycles: events.length, events, warning,
     csv, xlsx, png, stick, perCycle,
+    light: light ? { events: light.events, info: light.info, roi: opts.light, csv: lightCsv } : null,
   };
 }
 
@@ -777,7 +914,7 @@ function toCSV(cols, rows) {
   return [cols.join(","), ...rows.map((r) => cols.map((c) => cell(r[c])).join(","))].join("\r\n") + "\r\n";
 }
 function aoa(cols, objs) { return [cols, ...objs.map((o) => cols.map((c) => (o[c] == null || Number.isNaN(o[c]) ? null : o[c])))]; }
-function buildXlsx(cols, rows, cycleData, events, cycleSide, pc = null, refSide = null, rtDir = null) {
+function buildXlsx(cols, rows, cycleData, events, cycleSide, pc = null, refSide = null, rtDir = null, range = null, light = null) {
   const X = window.XLSX, wb = X.utils.book_new();
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(cols, rows)), "フレーム別角度");
   const ccols = ["gait_cycle_percent", "left_knee_mean_deg", "left_hip_mean_deg", "right_knee_mean_deg", "right_hip_mean_deg"];
@@ -791,6 +928,11 @@ function buildXlsx(cols, rows, cycleData, events, cycleSide, pc = null, refSide 
     X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(G.NORM_COLUMNS, pc.list.flatMap((c) => c.norm))), "周期別_正規化");
   }
   const notes = G.notesTable(cycleSide, events.length, pc ? refSide : null);
+  if (light) {
+    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(light.events.length ? aoa(G.LIGHT_COLUMNS, light.events) : [G.LIGHT_COLUMNS, [light.info && light.info.note || "光刺激を検出できませんでした"]]), "光刺激");
+    notes.push(["光刺激", G.LIGHT_NOTE + (light.info ? ` この動画：消灯時の基準 ${light.info.base}、最大 ${light.info.peak}。` : "") + " light_brightness列は範囲の平均輝度、light_on列は点灯中=1。"]);
+  }
+  if (range) notes.push(["解析区間", range.whole ? "動画全体" : `${range.start.toFixed(2)}〜${range.end.toFixed(2)}秒（frame・time_seconds・接地の時刻は元の動画の通し番号・時刻）`]);
   notes.push(["対象者", "最初に選んだ人（タップで指定した人、または進行方向の先頭の人）を、前フレームからの予測位置と主要関節（肩・股・膝・足首）の位置の近さでフレームをまたいで追跡。対象者を確認できないフレームは別の人に乗り換えず空欄とし、1秒以上見失った場合は進行方向の先頭の人を選び直す。"]);
   if (rtDir != null) notes.push(["往復", G.roundTripNote(rtDir) + " segment列: outbound=往路, turn=方向転換（除外）, return=復路。"]);
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([["項目", "説明"], ...notes]), "説明");
@@ -893,6 +1035,7 @@ async function openResult(id) {
     <table class="sum">
       <tr><td>動画</td><td>${esc(r.videoName)}（${r.width}×${r.height}）</td></tr>
       <tr><td>解析エンジン</td><td>${r.engine === "rtmpose" ? "RTMPose（Halpe26）" : "MediaPipe Pose"}${r.backendName ? `・${r.backendName}` : ""}</td></tr>
+      <tr><td>解析区間</td><td>${!r.range || r.range.whole ? "動画全体" : `${r.range.start.toFixed(2)}〜${r.range.end.toFixed(2)}秒`}</td></tr>
       <tr><td>フレーム数 / fps</td><td>${r.frames} / ${r.fps}</td></tr>
       <tr><td>人物検出フレーム</td><td>${r.detected}（${Math.round((100 * r.detected) / r.frames)}%）</td></tr>
       <tr><td>追跡対象</td><td>${r.trackInfo && r.trackInfo.seeded ? "タップで指定した人" : `進行方向（${r.direction > 0 ? "右" : "左"}${r.dir2 != null ? `→${r.dir2 > 0 ? "右" : "左"}の往復` : ""}）の先頭の人`}${r.trackInfo ? "（フレームをまたいで同じ人を追跡）" : ""}</td></tr>
@@ -901,6 +1044,7 @@ async function openResult(id) {
       <tr><td>周期</td><td>${sideJ}側の足・${r.nCycles}周期（接地検出は推定）</td></tr>
     </table>
     ${r.perCycle ? cycleSection(r) : ""}
+    ${r.light ? lightSection(r) : ""}
     <img id="graphImg" src="${u(r.png)}" alt="グラフ">
     ${r.stick ? `<h2>スティックピクチャー動画</h2><video src="${u(r.stick)}" controls playsinline></video>` : ""}
     <div class="row">
@@ -918,6 +1062,16 @@ async function openResult(id) {
 }
 const sideJp = (s) => (s === "left" ? "左" : "右");
 const fmt1 = (v) => (v == null ? "-" : Number(v).toFixed(1));
+function lightSection(r) {
+  const L = r.light;
+  if (!L.events.length) return `<h2>光刺激</h2><p class="warn">${esc((L.info && L.info.note) || "光刺激を検出できませんでした")}。光の範囲を指定し直してください。</p>`;
+  return `<h2>光刺激（${L.events.length}回）</h2>
+    <div class="tblwrap"><table class="cyc">
+      <tr><th>回</th><th>点灯フレーム</th><th>点灯時刻(秒)</th><th>消灯時刻(秒)</th><th>点灯時間(秒)</th></tr>
+      ${L.events.map((e) => `<tr><td>${e.event}</td><td>${e.onset_frame}</td><td>${e.onset_time_seconds.toFixed(3)}</td><td>${e.offset_time_seconds == null ? "-" : e.offset_time_seconds.toFixed(3)}</td><td>${e.duration_seconds == null ? "-" : e.duration_seconds.toFixed(3)}</td></tr>`).join("")}
+    </table></div>
+    <p class="hint">時刻は元の動画の時刻です。精度は1フレーム（${(1000 / r.fps).toFixed(0)}ミリ秒）。</p>`;
+}
 function cycleSection(r) {
   const pcs = r.perCycle;
   const segs = [...new Set(pcs.summaries.map((s) => s.segment))].filter((x) => x && x !== "片道");
@@ -976,6 +1130,7 @@ function resultFiles(r) {
     f.push({ label: "周期一覧CSV", file: new File([r.perCycle.summaryCsv], `${r.base}_cycle_summary.csv`, { type: "text/csv" }) });
     f.push({ label: "周期別CSV", file: new File([r.perCycle.normCsv], `${r.base}_cycles_normalized.csv`, { type: "text/csv" }) });
   }
+  if (r.light && r.light.csv) f.push({ label: "光刺激CSV", file: new File([r.light.csv], `${r.base}_light_events.csv`, { type: "text/csv" }) });
   if (r.stick) f.push({ label: "スティック動画", file: new File([r.stick], `${r.base}_stick_figure.mp4`, { type: "video/mp4" }) });
   return f;
 }
