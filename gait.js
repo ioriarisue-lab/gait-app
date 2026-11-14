@@ -582,6 +582,30 @@ export function roundTripNote(dir1) {
   return `往復（${d(dir1)}へ→${d(-dir1)}へ）。骨盤中心が${d(dir1)}方向に最も進んだ時点を折り返し点とし、その前後で骨盤中心の水平速度が歩行時の中央値の30%未満の区間に前後0.2秒を加えた範囲を方向転換として除外。往路・復路それぞれで歩行周期を検出し、方向転換をまたぐ周期は作らない。複数人が映る場合、往路は${d(dir1)}方向、復路は${d(-dir1)}方向で先頭の人物を追跡。`;
 }
 
+// ---------- 出力用の座標の原点 ----------
+// lt=左上（MediaPipe標準：右・下が正）、lb=左下（右・上が正）、rb=右下（左・上が正）
+export const ORIGINS = { lt: "左上", lb: "左下", rb: "右下" };
+export function originNote(origin) {
+  const t = { lt: "画像の左上が(0,0)。xは右へ、yは下へ行くほど大きくなる（MediaPipeの標準）", lb: "画像の左下が(0,0)。xは右へ、yは上へ行くほど大きくなる", rb: "画像の右下が(0,0)。xは左へ、yは上へ行くほど大きくなる" }[origin] || "";
+  return `関節点ごとに画像内の正規化X/Y（0〜1）とピクセルX/Yを記録。${t}。角度・距離の計算は原点の設定に関係なく同じ。visibilityは推定可視性。`;
+}
+export function exportRowsWithOrigin(rows, origin, w, h) {
+  if (!origin || origin === "lt") return rows;
+  const flipX = origin === "rb", flipY = origin === "lb" || origin === "rb";
+  return rows.map((r) => {
+    const o = { ...r };
+    for (const k of Object.keys(r)) {
+      const v = r[k];
+      if (v == null || typeof v !== "number") continue;
+      if (flipX && k.endsWith("_x_norm")) o[k] = round(1 - v, 6);
+      else if (flipX && k.endsWith("_x_px")) o[k] = round(w - v, 2);
+      else if (flipY && k.endsWith("_y_norm")) o[k] = round(1 - v, 6);
+      else if (flipY && k.endsWith("_y_px")) o[k] = round(h - v, 2);
+    }
+    return o;
+  });
+}
+
 // ---------- 光刺激の検出 ----------
 // 指定した範囲の平均輝度（0〜255）から、光が点いた瞬間（立ち上がり）を検出する。
 // 基準（消灯）＝下位10%の値、振幅＝最大値−基準。振幅が12未満なら光なしとみなす。

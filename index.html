@@ -106,6 +106,15 @@
       </label>
     </div>
     <p class="hint">GitHubには rtm_det.onnx・rtm_pose.onnx の名前で置くか、「分割して書き出す」で作った .part1, .part2 … を置くと自動で読み込まれます。</p>
+    <h2>座標の原点（CSV・Excelの出力）</h2>
+    <div class="row">
+      <select id="originSel">
+        <option value="rb">右下（xは左へ、yは上へ増える）</option>
+        <option value="lb">左下（xは右へ、yは上へ増える）</option>
+        <option value="lt">左上（MediaPipeの標準：xは右へ、yは下へ増える）</option>
+      </select>
+    </div>
+    <p class="hint">変わるのは出力する座標の値だけで、角度や距離の計算は同じです。次に解析した結果から反映されます。</p>
     <h2>保存容量</h2>
     <p id="storageInfo">-</p>
     <h2>このアプリについて</h2>

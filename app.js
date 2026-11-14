@@ -3,7 +3,7 @@ import { Muxer, ArrayBufferTarget } from "./mp4-muxer.mjs";
 import * as G from "./gait.js";
 import { RTMPoseEstimator } from "./rtm.js";
 
-const APP_VERSION = "1.11.0";
+const APP_VERSION = "1.12.0";
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -402,6 +402,7 @@ async function renderSettings() {
     $(`#${k}Status`).innerHTML = m ? `保存済み: <b>${esc(m.name)}</b>（${fmtSize(m.size)}）` : "未設定";
   }
   $("#rtmPref").value = lsGet("rtm_pref", "auto");
+  $("#originSel").value = lsGet("origin", "rb");
 }
 for (const k of ["rtm_det", "rtm_pose"]) {
   $(`#${k}Import`).onchange = async (e) => {
@@ -422,6 +423,7 @@ for (const k of ["rtm_det", "rtm_pose"]) {
   $(`#${k}Del`).onclick = async () => { if (confirm("このモデルを端末から削除しますか？")) { await dbDel("kv", k); renderSettings(); } };
 }
 $("#rtmPref").onchange = (e) => lsSet("rtm_pref", e.target.value);
+$("#originSel").onchange = (e) => { lsSet("origin", e.target.value); toast(`座標の原点を${G.ORIGINS[e.target.value]}にしました（次の解析から）`); };
 const RTM_FILES = { rtm_det: "rtm_det.onnx", rtm_pose: "rtm_pose.onnx" };
 const lsGet = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
@@ -875,8 +877,10 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
   const cols = G.exportColumns();
   if (rt) cols.splice(5, 0, "segment");
   if (light) cols.splice(5, 0, "light_brightness", "light_on");
-  const csv = new Blob(["﻿" + toCSV(cols, rows)], { type: "text/csv" });
-  const xlsx = buildXlsx(cols, rows, cycleData, events, cycleSide, pc, opts.refSide, rt ? direction : null, range, light, st);
+  const origin = lsGet("origin", "rb");
+  const outRows = G.exportRowsWithOrigin(rows, origin, W, H); // 出力用（座標の原点を変換）
+  const csv = new Blob(["﻿" + toCSV(cols, outRows)], { type: "text/csv" });
+  const xlsx = buildXlsx(cols, outRows, cycleData, events, cycleSide, pc, opts.refSide, rt ? direction : null, range, light, st);
   const stCsv = new Blob(["\ufeff" + toCSV(G.ST_COLUMNS, st.cycles)], { type: "text/csv" });
   const lightCsv = light ? new Blob(["\ufeff" + toCSV(G.LIGHT_COLUMNS, light.events)], { type: "text/csv" }) : null;
   const png = await canvasBlob(drawGraph(rows, cycleData, events.length, fps));
@@ -887,13 +891,14 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
       refSide: opts.refSide,
       summaries: pc.list.map((c) => c.summary),
       norms: pc.list.map((c) => c.norm),
-      csvs: pc.list.map((c) => new Blob(["\ufeff" + toCSV(pcols, rows.slice(c.a, c.b + 1).map((r, i) => ({ ...r, cycle_percent: Math.round((10000 * i) / (c.b - c.a)) / 100 })))], { type: "text/csv" })),
+      csvs: pc.list.map((c) => new Blob(["\ufeff" + toCSV(pcols, outRows.slice(c.a, c.b + 1).map((r, i) => ({ ...r, cycle_percent: Math.round((10000 * i) / (c.b - c.a)) / 100 })))], { type: "text/csv" })),
       summaryCsv: new Blob(["\ufeff" + toCSV(G.SUMMARY_COLUMNS, pc.list.map((c) => c.summary))], { type: "text/csv" }),
       normCsv: new Blob(["\ufeff" + toCSV(G.NORM_COLUMNS, pc.list.flatMap((c) => c.norm))], { type: "text/csv" }),
     };
   }
   const detected = rows.filter((r) => r.left_knee_flexion_deg != null || r.right_knee_flexion_deg != null).length;
   return {
+    origin,
     id: uid(), videoId: rec.id, videoName: rec.name, base, created: Date.now(), direction, dir2, fps, engine, backendName, trackInfo,
     roundTrip: rt ? { turnFrame: rt.turnFrame + f0, turnStart: rt.turnStart + f0, turnEnd: rt.turnEnd + f0 } : null, range,
     frames: rows.length, width: W, height: H, detected, cycleSide, nCycles: events.length, events, warning,
@@ -969,6 +974,8 @@ function buildXlsx(cols, rows, cycleData, events, cycleSide, pc = null, refSide 
     X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(G.NORM_COLUMNS, pc.list.flatMap((c) => c.norm))), "周期別_正規化");
   }
   const notes = G.notesTable(cycleSide, events.length, pc ? refSide : null);
+  const oi = notes.findIndex((n) => n[0] === "座標");
+  if (oi >= 0) notes[oi] = ["座標", G.originNote(lsGet("origin", "rb"))];
   if (st) {
     X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(stSummaryRows(st)), "時間距離因子");
     X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(st.cycles.length ? aoa(G.ST_COLUMNS, st.cycles) : [G.ST_COLUMNS, ["接地を検出できませんでした"]]), "周期_左右");
@@ -1085,6 +1092,7 @@ async function openResult(id) {
     <table class="sum">
       <tr><td>動画</td><td>${esc(r.videoName)}（${r.width}×${r.height}）</td></tr>
       <tr><td>解析エンジン</td><td>${r.engine === "rtmpose" ? "RTMPose（Halpe26）" : "MediaPipe Pose"}${r.backendName ? `・${r.backendName}` : ""}</td></tr>
+      <tr><td>座標の原点</td><td>${G.ORIGINS[r.origin || "lt"]}</td></tr>
       <tr><td>解析区間</td><td>${!r.range || r.range.whole ? "動画全体" : `${r.range.start.toFixed(2)}〜${r.range.end.toFixed(2)}秒`}</td></tr>
       <tr><td>フレーム数 / fps</td><td>${r.frames} / ${r.fps}</td></tr>
       <tr><td>人物検出フレーム</td><td>${r.detected}（${Math.round((100 * r.detected) / r.frames)}%）</td></tr>
@@ -1204,7 +1212,18 @@ function resultFiles(r) {
 function updBadge() { $("#netBadge").textContent = !modelBytes ? "モデル未設定" : navigator.onLine ? "オフライン対応" : "オフラインで動作中"; }
 (async () => {
   if ("serviceWorker" in navigator) {
-    try { await navigator.serviceWorker.register("sw.js"); } catch {}
+    try {
+      const hadController = !!navigator.serviceWorker.controller;
+      // 新しい版に切り替わったら1回だけ読み込み直す（初回インストール時は除く）
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (!hadController || sessionStorage.getItem("swReloaded")) return;
+        sessionStorage.setItem("swReloaded", "1");
+        location.reload();
+      });
+      const reg = await navigator.serviceWorker.register("sw.js", { updateViaCache: "none" });
+      reg.update().catch(() => {});
+      if (sessionStorage.getItem("swReloaded")) { sessionStorage.removeItem("swReloaded"); setTimeout(() => toast(`新しいバージョン（${APP_VERSION}）に更新しました`), 800); }
+    } catch {}
   }
   try { await navigator.storage?.persist?.(); } catch {}
   const m = await getModel();
