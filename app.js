@@ -3,7 +3,7 @@ import { Muxer, ArrayBufferTarget } from "./mp4-muxer.mjs";
 import * as G from "./gait.js";
 import { RTMPoseEstimator } from "./rtm.js";
 
-const APP_VERSION = "1.10.0";
+const APP_VERSION = "1.11.0";
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
@@ -514,7 +514,7 @@ $("#pickBtn").onclick = () => {
   const c = $("#pickCanvas"), on = !c.classList.contains("active");
   c.classList.toggle("active", on);
   $("#pickBtn").textContent = on ? "動画の中の対象者をタップ…" : "対象者をタップで指定";
-  if (on) { pickMode = "person"; $("#anaPreview").pause(); toast("対象者が映っている場面で、その人の胴体をタップしてください"); }
+  if (on) { pickMode = "person"; $("#anaPreview").pause(); $("#anaPreview").scrollIntoView({ block: "center" }); toast("対象者が映っている場面で、その人の胴体をタップしてください"); }
 };
 // ---------- 光刺激の範囲指定（ドラッグで四角を描く） ----------
 let pickMode = "person", anaLight = null, lightDrag = null;
@@ -533,6 +533,7 @@ function setLight(roi, save = true) {
 $("#lightBtn").onclick = () => {
   const c = $("#pickCanvas");
   pickMode = "light"; c.classList.add("active"); $("#anaPreview").pause();
+  $("#anaPreview").scrollIntoView({ block: "center" }); // 動画が見える位置まで戻す
   $("#lightChk").checked = true;
   toast("光が映る場所を指でなぞって囲んでください");
 };
@@ -602,6 +603,13 @@ $("#anaPreview").addEventListener("loadedmetadata", () => setRangeInputs(0, pvDu
 $("#rangeBar").addEventListener("click", (e) => { // バーをタップしてその位置へ移動
   const r = $("#rangeBar").getBoundingClientRect(); $("#anaPreview").currentTime = ((e.clientX - r.left) / r.width) * pvDur();
 });
+function saveLegCm() {
+  const v = parseFloat($("#legCm").value);
+  if (!(v > 20 && v < 150)) return null;
+  lsSet("legCm", String(v));
+  if (anaRec && anaRec.legCm !== v) { anaRec.legCm = v; dbPut("videos", anaRec); }
+  return v;
+}
 let anaRec = null, anaMode = "r", anaRef = "right", cancelFlag = false, running = false;
 $$("#refSeg button").forEach((b) => b.addEventListener("click", () => {
   anaRef = b.dataset.ref;
@@ -620,6 +628,7 @@ async function openAnalyze(rec) {
   $("#anaProgress").classList.add("hidden");
   $("#anaStart").disabled = false; $("#anaCancel").textContent = "閉じる";
   $("#anaFps").value = rec.fps || 30;
+  $("#legCm").value = rec.legCm || lsGet("legCm", "") || "";
   setSeed(null); $("#pickCanvas").classList.remove("active"); $("#pickBtn").textContent = "対象者をタップで指定"; pickMode = "person";
   let roi = rec.lightRoi || null;
   const had = !!roi;
@@ -666,7 +675,7 @@ $("#anaStart").onclick = async () => {
   $("#anaProgress").classList.remove("hidden");
   keepAwake(true);
   try {
-    const result = await analyze(anaRec, MODES[anaMode], fps, $("#anaStick").checked, { perCycle: $("#anaPerCycle").checked, refSide: anaRef, engine: anaEngine, seed: anaSeed, range: getRange(), light: $("#lightChk").checked && anaLight ? anaLight : null }, (i, n, msg) => {
+    const result = await analyze(anaRec, MODES[anaMode], fps, $("#anaStick").checked, { perCycle: $("#anaPerCycle").checked, refSide: anaRef, engine: anaEngine, seed: anaSeed, range: getRange(), legCm: saveLegCm(), light: $("#lightChk").checked && anaLight ? anaLight : null }, (i, n, msg) => {
       $("#anaBar").value = n ? i / n : 0;
       $("#anaText").textContent = msg || `${i} / ${n} フレーム`;
     });
@@ -810,6 +819,7 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
   progress(total, total, "ファイルを作成中…");
   // frame・time_seconds は元の動画の通し番号・時刻
   const rows = track.sel.map((pose, i) => G.buildRow(f0 + i, fps, Math.round(((f0 + i) * 1000) / fps), W, H, pose));
+  G.limbAngles(rows, dirAt);
   if (light) rows.forEach((r, i) => { r.light_brightness = Math.round(lightVals[i] * 10) / 10; r.light_on = light.on[i]; });
   const trackInfo = {
     seeded: track.seeded,
@@ -834,6 +844,17 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
     try { ({ cycleData, events } = rt ? legacyRoundTrip(rows, cycleSide, fps, W, rt.segments) : G.normalizedCycles(rows, cycleSide, fps, W)); }
     catch (e) { warning += (warning ? "\n" : "") + e.message; }
   }
+  // 時間距離因子（左右の接地・つま先離地、長さは転子果長で換算）
+  const scale = G.legScale(rows, opts.legCm);
+  const st = G.spatioTemporal(rows, rt ? rt.segments : [{ a: 0, b: rows.length - 1, dir: direction, label: "片道" }], fps, H, scale);
+  if (pc) for (const c of pc.list) { // 基準足の周期に、同じ周期の時間距離因子を付ける
+    const m = st.cycles.find((x) => x.side === opts.refSide && x.start_frame === c.a);
+    for (const k of ["stance_percent", "swing_percent", "stride_length_cm", "step_length_cm", "tla_deg", "tla_timing_percent"]) c.summary[k] = m ? m[k] : null;
+  }
+  if (f0 > 0) for (const c of st.cycles) {
+    c.start_frame += f0; c.end_frame += f0; if (c.toe_off_frame != null) c.toe_off_frame += f0;
+    c.start_time_seconds = Math.round((c.start_frame / fps) * 1000) / 1000;
+  }
   // 周期・接地の番号を元の動画の通し番号・時刻にそろえる
   if (f0 > 0) {
     const r3 = (x) => Math.round(x * 1000) / 1000, sh = (f) => f + f0;
@@ -855,7 +876,8 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
   if (rt) cols.splice(5, 0, "segment");
   if (light) cols.splice(5, 0, "light_brightness", "light_on");
   const csv = new Blob(["﻿" + toCSV(cols, rows)], { type: "text/csv" });
-  const xlsx = buildXlsx(cols, rows, cycleData, events, cycleSide, pc, opts.refSide, rt ? direction : null, range, light);
+  const xlsx = buildXlsx(cols, rows, cycleData, events, cycleSide, pc, opts.refSide, rt ? direction : null, range, light, st);
+  const stCsv = new Blob(["\ufeff" + toCSV(G.ST_COLUMNS, st.cycles)], { type: "text/csv" });
   const lightCsv = light ? new Blob(["\ufeff" + toCSV(G.LIGHT_COLUMNS, light.events)], { type: "text/csv" }) : null;
   const png = await canvasBlob(drawGraph(rows, cycleData, events.length, fps));
   let perCycle = null;
@@ -875,7 +897,7 @@ async function analyze(rec, mode, fps, makeStick, opts, progress) {
     id: uid(), videoId: rec.id, videoName: rec.name, base, created: Date.now(), direction, dir2, fps, engine, backendName, trackInfo,
     roundTrip: rt ? { turnFrame: rt.turnFrame + f0, turnStart: rt.turnStart + f0, turnEnd: rt.turnEnd + f0 } : null, range,
     frames: rows.length, width: W, height: H, detected, cycleSide, nCycles: events.length, events, warning,
-    csv, xlsx, png, stick, perCycle,
+    csv, xlsx, png, stick, perCycle, st: { summary: st.summary, scale: st.scale, cycles: st.cycles, csv: stCsv },
     light: light ? { events: light.events, info: light.info, roi: opts.light, csv: lightCsv } : null,
   };
 }
@@ -909,15 +931,34 @@ function legacyRoundTrip(rows, side, fps, W, segments) {
   return { cycleData, events };
 }
 
+// 時間距離因子のまとめ表（Excel・画面用）
+function stSummaryRows(st) {
+  const S = st.summary, L = S.left, R = S.right, f = (v, d = 1) => (v == null ? "" : Number(Number(v).toFixed(d)));
+  const rows = [["項目", "左", "右", "単位・備考"],
+    ["歩行速度", f(S.speed_m_per_s, 2), "", S.speed_m_per_s == null ? "転子果長を入力すると算出" : "m/s"],
+    ["ケイデンス", f(S.cadence_steps_per_min), "", "歩/分"],
+    ["歩行周期", f(L.cycle_time_seconds, 2), f(R.cycle_time_seconds, 2), "秒"],
+    ["立脚期", f(L.stance_percent), f(R.stance_percent), "%（周期に対する割合）"],
+    ["遊脚期", f(L.swing_percent), f(R.swing_percent), "%"],
+    ["立脚期割合比（右/左）", f(S.stance_ratio_right_left, 3), "", "1に近いほど左右対称"],
+    ["ストライド長", f(L.stride_length_cm), f(R.stride_length_cm), "cm"],
+    ["ステップ長", f(L.step_length_cm), f(R.step_length_cm), "cm（その足の接地時の、対側の踵からの距離）"],
+    ["TLA", f(L.tla_deg), f(R.tla_deg), "度（最も後ろに引いたときの下肢角度）"],
+    ["TLAの時期", f(L.tla_timing_percent), f(R.tla_timing_percent), "%（周期内）"],
+    ["周期数", L.n, R.n, ""]];
+  for (const g of S.segments) if (g.segment !== "片道") rows.push([`歩行速度（${g.segment}）`, f(g.speed_m_per_s, 2), "", "m/s"]);
+  return rows;
+}
+
 const cell = (v) => (v == null || (typeof v === "number" && !Number.isFinite(v)) ? "" : String(v));
 function toCSV(cols, rows) {
   return [cols.join(","), ...rows.map((r) => cols.map((c) => cell(r[c])).join(","))].join("\r\n") + "\r\n";
 }
 function aoa(cols, objs) { return [cols, ...objs.map((o) => cols.map((c) => (o[c] == null || Number.isNaN(o[c]) ? null : o[c])))]; }
-function buildXlsx(cols, rows, cycleData, events, cycleSide, pc = null, refSide = null, rtDir = null, range = null, light = null) {
+function buildXlsx(cols, rows, cycleData, events, cycleSide, pc = null, refSide = null, rtDir = null, range = null, light = null, st = null) {
   const X = window.XLSX, wb = X.utils.book_new();
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(cols, rows)), "フレーム別角度");
-  const ccols = ["gait_cycle_percent", "left_knee_mean_deg", "left_hip_mean_deg", "right_knee_mean_deg", "right_hip_mean_deg"];
+  const ccols = ["gait_cycle_percent", ...["left", "right"].flatMap((s) => G.JOINTS.map((j) => `${s}_${j}_mean_deg`))];
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(cycleData ? aoa(ccols, cycleData) : [ccols, ["歩行周期を検出できませんでした"]]), "正規化グラフ用");
   const ecols = ["side", "cycle", "start_contact_frame", "start_time_seconds", "next_contact_frame", "next_contact_time_seconds", "cycle_duration_seconds"];
   if (pc) ecols.push("start_contact");
@@ -928,6 +969,11 @@ function buildXlsx(cols, rows, cycleData, events, cycleSide, pc = null, refSide 
     X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(aoa(G.NORM_COLUMNS, pc.list.flatMap((c) => c.norm))), "周期別_正規化");
   }
   const notes = G.notesTable(cycleSide, events.length, pc ? refSide : null);
+  if (st) {
+    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(stSummaryRows(st)), "時間距離因子");
+    X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(st.cycles.length ? aoa(G.ST_COLUMNS, st.cycles) : [G.ST_COLUMNS, ["接地を検出できませんでした"]]), "周期_左右");
+    notes.push(["時間距離因子・足関節・TLA", G.ST_NOTE + (st.scale ? ` 換算：転子果長 ${st.scale.legCm} cm＝${st.scale.legPx} px（${st.scale.method}）。` : " 転子果長が未入力のため、長さと歩行速度は出していません。")]);
+  }
   if (light) {
     X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(light.events.length ? aoa(G.LIGHT_COLUMNS, light.events) : [G.LIGHT_COLUMNS, [light.info && light.info.note || "光刺激を検出できませんでした"]]), "光刺激");
     notes.push(["光刺激", G.LIGHT_NOTE + (light.info ? ` この動画：消灯時の基準 ${light.info.base}、最大 ${light.info.peak}。` : "") + " light_brightness列は範囲の平均輝度、light_on列は点灯中=1。"]);
@@ -943,55 +989,59 @@ const canvasBlob = (c) => new Promise((r) => c.toBlob(r, "image/png"));
 
 // グラフ（matplotlib版と同じ構成：上=膝、下=股関節）
 function drawGraph(rows, cycleData, nCycles, fps, opt = {}) {
-  const Wc = 1920, Hc = 1280, c = document.createElement("canvas"); c.width = Wc; c.height = Hc;
+  const Wc = 2000, Hc = 1400, c = document.createElement("canvas"); c.width = Wc; c.height = Hc;
   const g = c.getContext("2d");
   g.fillStyle = "#fff"; g.fillRect(0, 0, Wc, Hc);
   const font = (s, b = "") => `${b} ${s}px "Hiragino Sans", -apple-system, sans-serif`;
   const cyc = !!cycleData;
-  let xs, xmax, xlabel;
+  let xs, xmin = 0, xmax, xlabel;
   if (cyc) { xs = cycleData.map((r) => r.gait_cycle_percent); xmax = 100; xlabel = "歩行周期（同じ足の接地から次の接地 = 0〜100%）"; }
-  else { xs = rows.map((r) => r.time_seconds); xmax = Math.max(1e-6, xs[xs.length - 1]); xlabel = "時間（秒）"; }
+  else { xs = rows.map((r) => r.time_seconds); xmin = xs[0] || 0; xmax = Math.max(xmin + 1e-6, xs[xs.length - 1]); xlabel = "時間（秒）"; }
   g.fillStyle = "#000"; g.textAlign = "center"; g.textBaseline = "middle";
   g.font = font(34, "bold");
   g.fillText(opt.title ? opt.title : cyc ? "歩行周期に対する2D角度推定 — 臨床測定ではありません" : "フレーム別2D角度推定（歩行周期は検出できませんでした）— 臨床測定ではありません", Wc / 2, 40);
   const panels = [
-    { joint: "knee", title: cyc ? "歩行周期に対する膝の推定屈曲角度" : "膝の推定屈曲角度", name: "膝" },
-    { joint: "hip", title: cyc ? "歩行周期に対する股関節の推定屈曲角度" : "股関節の推定屈曲角度", name: "股関節" },
+    { joint: "knee", title: "膝関節 屈曲角度", name: "膝", unit: "屈曲（度）" },
+    { joint: "hip", title: "股関節 屈曲角度", name: "股", unit: "屈曲（度）" },
+    { joint: "ankle", title: "足関節 背屈（＋）／底屈（−）", name: "足", unit: "背屈（度）" },
+    { joint: "limb", title: "下肢角度（limb angle、足先が前で＋）", name: "下肢", unit: "角度（度）" },
   ];
-  const L = 150, R = Wc - 60, top0 = 120, ph = 470, gap = 130;
+  const pw = 830, ph = 470, lefts = [140, 140 + pw + 160], tops = [130, 130 + ph + 150];
   panels.forEach((p, k) => {
-    const T = top0 + k * (ph + gap), B = T + ph;
-    const series = ["left", "right"].map((s) => cyc ? cycleData.map((r) => r[`${s}_${p.joint}_mean_deg`]) : rows.map((r) => r[`${s}_${p.joint}_flexion_deg`]));
+    const L = lefts[k % 2], R = L + pw, T = tops[Math.floor(k / 2)], B = T + ph;
+    const series = ["left", "right"].map((s) => cyc ? cycleData.map((r) => r[`${s}_${p.joint}_mean_deg`]) : rows.map((r) => r[`${s}_${G.JOINT_COL[p.joint]}`]));
     const all = series.flat().filter((v) => v != null && Number.isFinite(v));
     let lo = all.length ? Math.min(...all) : 0, hi = all.length ? Math.max(...all) : 10;
     const padv = Math.max(2, (hi - lo) * 0.08); lo -= padv; hi += padv;
     const step = niceStep((hi - lo) / 6);
     lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
-    const X = (x) => L + ((R - L) * x) / xmax, Y = (y) => B - ((B - T) * (y - lo)) / (hi - lo);
-    g.font = font(28); g.fillStyle = "#000"; g.textAlign = "center"; g.fillText(p.title, (L + R) / 2, T - 28);
-    g.strokeStyle = "rgba(0,0,0,0.12)"; g.lineWidth = 1.5; g.font = font(22); g.fillStyle = "#333";
-    for (let y = lo; y <= hi + 1e-9; y += step) { g.beginPath(); g.moveTo(L, Y(y)); g.lineTo(R, Y(y)); g.stroke(); g.textAlign = "right"; g.fillText(String(Math.round(y * 100) / 100), L - 12, Y(y)); }
-    const xstep = cyc ? 10 : niceStep(xmax / 10);
-    for (let x = 0; x <= xmax + 1e-9; x += xstep) { g.beginPath(); g.moveTo(X(x), T); g.lineTo(X(x), B); g.stroke(); if (k === 1 || !cyc) { g.textAlign = "center"; g.fillText(String(Math.round(x * 100) / 100), X(x), B + 24); } }
+    const X = (x) => L + ((R - L) * (x - xmin)) / (xmax - xmin), Y = (y) => B - ((B - T) * (y - lo)) / (hi - lo);
+    g.font = font(28, "bold"); g.fillStyle = "#000"; g.textAlign = "center"; g.fillText(p.title, (L + R) / 2, T - 30);
+    g.strokeStyle = "rgba(0,0,0,0.12)"; g.lineWidth = 1.5; g.font = font(20); g.fillStyle = "#333";
+    for (let y = lo; y <= hi + 1e-9; y += step) { g.beginPath(); g.moveTo(L, Y(y)); g.lineTo(R, Y(y)); g.stroke(); g.textAlign = "right"; g.fillText(String(Math.round(y * 100) / 100), L - 10, Y(y)); }
+    if (lo < 0 && hi > 0) { g.strokeStyle = "rgba(0,0,0,0.45)"; g.beginPath(); g.moveTo(L, Y(0)); g.lineTo(R, Y(0)); g.stroke(); }
+    const xstep = cyc ? 20 : niceStep((xmax - xmin) / 8);
+    const x0 = cyc ? 0 : Math.ceil(xmin / xstep) * xstep;
+    g.strokeStyle = "rgba(0,0,0,0.12)";
+    for (let x = x0; x <= xmax + 1e-9; x += xstep) { g.beginPath(); g.moveTo(X(x), T); g.lineTo(X(x), B); g.stroke(); g.textAlign = "center"; g.fillStyle = "#333"; g.fillText(String(Math.round(x * 100) / 100), X(x), B + 22); }
     g.strokeStyle = "#000"; g.lineWidth = 2; g.strokeRect(L, T, R - L, B - T);
-    g.save(); g.translate(48, (T + B) / 2); g.rotate(-Math.PI / 2); g.textAlign = "center"; g.font = font(24); g.fillStyle = "#000"; g.fillText("角度（度）", 0, 0); g.restore();
+    g.save(); g.translate(L - 80, (T + B) / 2); g.rotate(-Math.PI / 2); g.textAlign = "center"; g.font = font(22); g.fillStyle = "#000"; g.fillText(p.unit, 0, 0); g.restore();
     const colors = ["#1f77b4", "#ff7f0e"], names = ["左", "右"];
     series.forEach((ys, si) => {
       g.strokeStyle = colors[si]; g.lineWidth = 3; g.beginPath(); let pen = false;
       ys.forEach((y, i) => { if (y == null || !Number.isFinite(y)) { pen = false; return; } if (!pen) { g.moveTo(X(xs[i]), Y(y)); pen = true; } else g.lineTo(X(xs[i]), Y(y)); });
       g.stroke();
     });
-    // 凡例
-    const lw = 420, lx = R - lw - 16, ly = T + 16;
-    g.fillStyle = "rgba(255,255,255,0.85)"; g.fillRect(lx, ly, lw, 86); g.strokeStyle = "#ccc"; g.lineWidth = 1; g.strokeRect(lx, ly, lw, 86);
+    const lw = 360, lx = R - lw - 12, ly = T + 12;
+    g.fillStyle = "rgba(255,255,255,0.85)"; g.fillRect(lx, ly, lw, 76); g.strokeStyle = "#ccc"; g.lineWidth = 1; g.strokeRect(lx, ly, lw, 76);
     names.forEach((n, si) => {
-      g.strokeStyle = colors[si]; g.lineWidth = 3; g.beginPath(); g.moveTo(lx + 16, ly + 24 + si * 38); g.lineTo(lx + 66, ly + 24 + si * 38); g.stroke();
-      g.fillStyle = "#000"; g.textAlign = "left"; g.font = font(22);
-      g.fillText(cyc ? `${n}${p.name}（${opt.legend || nCycles + "周期平均"}）` : `${n}${p.name}`, lx + 78, ly + 24 + si * 38);
+      g.strokeStyle = colors[si]; g.lineWidth = 3; g.beginPath(); g.moveTo(lx + 14, ly + 22 + si * 34); g.lineTo(lx + 58, ly + 22 + si * 34); g.stroke();
+      g.fillStyle = "#000"; g.textAlign = "left"; g.font = font(20);
+      g.fillText(cyc ? `${n}${p.name}（${opt.legend || nCycles + "周期平均"}）` : `${n}${p.name}`, lx + 68, ly + 22 + si * 34);
     });
   });
   g.textAlign = "center"; g.font = font(26); g.fillStyle = "#000";
-  g.fillText(xlabel, (L + R) / 2, top0 + 2 * ph + gap + 70);
+  g.fillText(xlabel, Wc / 2, Hc - 40);
   return c;
 }
 function niceStep(raw) {
@@ -1044,6 +1094,7 @@ async function openResult(id) {
       <tr><td>周期</td><td>${sideJ}側の足・${r.nCycles}周期（接地検出は推定）</td></tr>
     </table>
     ${r.perCycle ? cycleSection(r) : ""}
+    ${r.st ? stSection(r) : ""}
     ${r.light ? lightSection(r) : ""}
     <img id="graphImg" src="${u(r.png)}" alt="グラフ">
     ${r.stick ? `<h2>スティックピクチャー動画</h2><video src="${u(r.stick)}" controls playsinline></video>` : ""}
@@ -1062,6 +1113,19 @@ async function openResult(id) {
 }
 const sideJp = (s) => (s === "left" ? "左" : "右");
 const fmt1 = (v) => (v == null ? "-" : Number(v).toFixed(1));
+function stSection(r) {
+  const rows = stSummaryRows(r.st);
+  const sc = r.st.scale;
+  return `<h2>時間距離因子</h2>
+    <div class="tblwrap"><table class="cyc st">
+      <tr>${rows[0].map((h) => `<th>${esc(h)}</th>`).join("")}</tr>
+      ${rows.slice(1).map((x) => {
+        const single = ["歩行速度", "ケイデンス", "立脚期割合比"].some((k) => x[0].startsWith(k));
+        return `<tr><td style="text-align:left">${esc(x[0])}</td>${single ? `<td colspan="2" style="text-align:center">${esc(x[1]) || "-"}</td>` : `<td>${esc(x[1]) || "-"}</td><td>${esc(x[2]) || "-"}</td>`}<td style="text-align:left;color:var(--sub)">${esc(x[3])}</td></tr>`;
+      }).join("")}
+    </table></div>
+    <p class="hint">${sc ? `長さの換算：転子果長 ${sc.legCm} cm＝動画上 ${sc.legPx} px（${esc(sc.method)}）。` : "転子果長を入力すると、長さと歩行速度も出ます。"}カメラが進行方向に対して直角でないと、長さに誤差が出ます。</p>`;
+}
 function lightSection(r) {
   const L = r.light;
   if (!L.events.length) return `<h2>光刺激</h2><p class="warn">${esc((L.info && L.info.note) || "光刺激を検出できませんでした")}。光の範囲を指定し直してください。</p>`;
@@ -1096,7 +1160,7 @@ function cycleGraph(r, i) {
   const s = r.perCycle.summaries[i];
   const data = r.perCycle.norms[i].map((p) => ({
     gait_cycle_percent: p.gait_cycle_percent,
-    left_knee_mean_deg: p.left_knee_deg, left_hip_mean_deg: p.left_hip_deg, right_knee_mean_deg: p.right_knee_deg, right_hip_mean_deg: p.right_hip_deg,
+    ...Object.fromEntries(["left", "right"].flatMap((s) => G.JOINTS.map((j) => [`${s}_${j}_mean_deg`, p[`${s}_${j}_deg`]]))),
   }));
   return canvasBlob(drawGraph(null, data, 1, r.fps, { legend: `周期${s.cycle}`, title: `周期${s.cycle}（${sideJp(r.perCycle.refSide)}足基準・${s.start_contact}接地）— 臨床測定ではありません` }));
 }
@@ -1130,6 +1194,7 @@ function resultFiles(r) {
     f.push({ label: "周期一覧CSV", file: new File([r.perCycle.summaryCsv], `${r.base}_cycle_summary.csv`, { type: "text/csv" }) });
     f.push({ label: "周期別CSV", file: new File([r.perCycle.normCsv], `${r.base}_cycles_normalized.csv`, { type: "text/csv" }) });
   }
+  if (r.st && r.st.csv) f.push({ label: "時間距離CSV", file: new File([r.st.csv], `${r.base}_spatiotemporal.csv`, { type: "text/csv" }) });
   if (r.light && r.light.csv) f.push({ label: "光刺激CSV", file: new File([r.light.csv], `${r.base}_light_events.csv`, { type: "text/csv" }) });
   if (r.stick) f.push({ label: "スティック動画", file: new File([r.stick], `${r.base}_stick_figure.mp4`, { type: "video/mp4" }) });
   return f;

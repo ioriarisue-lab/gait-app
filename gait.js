@@ -21,6 +21,11 @@ export const IDS = {
   right: { shoulder: 12, hip: 24, knee: 26, ankle: 28, heel: 30, foot_index: 32 },
 };
 const SIDES = ["left", "right"];
+// 角度の種類と列名（knee/hip は伸展位0°の屈曲角、ankle は背屈を正、limb は足先が前で正）
+export const JOINTS = ["knee", "hip", "ankle", "limb"];
+export const JOINT_COL = { knee: "knee_flexion_deg", hip: "hip_flexion_deg", ankle: "ankle_dorsiflexion_deg", limb: "limb_angle_deg" };
+export const JOINT_JP = { knee: "膝関節", hip: "股関節", ankle: "足関節", limb: "下肢角度（limb angle）" };
+const col = (s, j) => `${s}_${JOINT_COL[j]}`;
 const XY_JOINTS = ["shoulder", "hip", "knee", "ankle"];
 
 const round = (v, d) => { const f = 10 ** d; return Math.round(v * f) / f; };
@@ -39,6 +44,26 @@ export function angleDegrees(a, b, c) {
 
 function vis(lm) { return lm.visibility ?? 1.0; }
 
+// 足関節：下腿（足関節→膝）と足部（踵→足先）のなす角から90°を引いた値。背屈が正、底屈が負。
+export function ankleDorsiflexion(knee, ankle, heel, toe) {
+  if (!knee || !ankle || !heel || !toe) return null;
+  const a = [knee[0] - ankle[0], knee[1] - ankle[1]], b = [toe[0] - heel[0], toe[1] - heel[1]];
+  const na = Math.hypot(...a), nb = Math.hypot(...b);
+  if (na < 1e-9 || nb < 1e-9) return null;
+  const c = Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1]) / (na * nb)));
+  return round(90 - (Math.acos(c) * 180) / Math.PI, 2);
+}
+// 下肢角度（limb angle）：股関節→足先の線と画像の鉛直線のなす角。足先が進行方向の前にあれば正、後ろなら負。
+// 進行方向 dirAt(i)（1=右, -1=左）を使ってフレームごとに入れる。
+export function limbAngles(rows, dirAt) {
+  rows.forEach((r, i) => {
+    for (const s of SIDES) {
+      const hx = r[`_${s}_hip_x`], tx = r[`_${s}_foot_index_x`], hy = r[`_${s}_hip_y`], ty = r[`_${s}_toe_y`];
+      r[col(s, "limb")] = isNum(hx) && isNum(tx) && isNum(hy) && isNum(ty) && ty > hy
+        ? round((Math.atan2((tx - hx) * dirAt(i), ty - hy) * 180) / Math.PI, 2) : null;
+    }
+  });
+}
 export function getPoint(landmarks, id, w, h) {
   const lm = landmarks[id];
   const v = vis(lm);
@@ -194,7 +219,8 @@ export function exportColumns() {
   const cols = ["frame", "time_seconds", "timestamp_ms", "image_width_px", "image_height_px"];
   for (const s of SIDES) {
     for (const j of XY_JOINTS) for (const a of ["x_norm", "y_norm", "x_px", "y_px", "visibility"]) cols.push(`${s}_${j}_${a}`);
-    cols.push(`${s}_hip_flexion_deg`, `${s}_knee_flexion_deg`);
+    cols.push(`${s}_hip_flexion_deg`, `${s}_knee_flexion_deg`, `${s}_ankle_dorsiflexion_deg`, `${s}_limb_angle_deg`);
+    for (const a of ["x_norm", "y_norm", "x_px", "y_px"]) cols.push(`${s}_heel_${a}`);
     for (const a of ["x_norm", "y_norm", "x_px", "y_px"]) cols.push(`${s}_foot_index_${a}`);
   }
   return cols;
@@ -205,7 +231,7 @@ export function buildRow(frameIndex, fps, timestampMs, w, h, pose) {
   for (const s of SIDES) {
     const id = IDS[s];
     if (pose) {
-      for (const j of [...XY_JOINTS, "foot_index"]) {
+      for (const j of [...XY_JOINTS, "heel", "foot_index"]) {
         const lm = pose[id[j]];
         row[`${s}_${j}_x_norm`] = round(lm.x, 6);
         row[`${s}_${j}_y_norm`] = round(lm.y, 6);
@@ -220,6 +246,9 @@ export function buildRow(frameIndex, fps, timestampMs, w, h, pose) {
       const [ft, ftv] = getPoint(pose, id.foot_index, w, h);
       row[`${s}_hip_flexion_deg`] = angleDegrees(sh, hp, kn);
       row[`${s}_knee_flexion_deg`] = angleDegrees(hp, kn, an);
+      const [hl] = getPoint(pose, id.heel, w, h);
+      row[`${s}_ankle_dorsiflexion_deg`] = ankleDorsiflexion(kn, an, hl, ft);
+      row[`${s}_limb_angle_deg`] = null; // 進行方向が決まってから limbAngles() で入れる
       // 可視性0.5未満は空欄（Python版と同じ上書き）
       row[`${s}_shoulder_visibility`] = shv;
       row[`${s}_hip_visibility`] = hpv;
@@ -228,6 +257,9 @@ export function buildRow(frameIndex, fps, timestampMs, w, h, pose) {
       row[`_${s}_foot_index_x`] = ft ? ft[0] : null;
       row[`_${s}_foot_index_visibility`] = ftv;
       row[`_${s}_hip_x`] = hp ? hp[0] : null;
+      row[`_${s}_hip_y`] = hp ? hp[1] : null;
+      row[`_${s}_ankle_x`] = an ? an[0] : null;
+      row[`_${s}_ankle_y`] = an ? an[1] : null;
       const [he] = getPoint(pose, id.heel, w, h);
       row[`_${s}_heel_x`] = he ? he[0] : null;
       row[`_${s}_heel_y`] = he ? he[1] : null;
@@ -235,6 +267,8 @@ export function buildRow(frameIndex, fps, timestampMs, w, h, pose) {
     } else {
       row[`${s}_hip_flexion_deg`] = null;
       row[`${s}_knee_flexion_deg`] = null;
+      row[`${s}_ankle_dorsiflexion_deg`] = null;
+      row[`${s}_limb_angle_deg`] = null;
       row[`_${s}_foot_index_x`] = null;
       row[`_${s}_foot_index_visibility`] = null;
       row[`_${s}_hip_x`] = null;
@@ -318,8 +352,8 @@ export function normalizedCycles(rows, side, fps, width) {
   }
   const phase = Array.from({ length: 101 }, (_, i) => i);
   const cycleData = phase.map((p) => ({ gait_cycle_percent: p }));
-  for (const s of SIDES) for (const joint of ["knee", "hip"]) {
-    const series = rows.map((r) => r[`${s}_${joint}_flexion_deg`]);
+  for (const s of SIDES) for (const joint of JOINTS) {
+    const series = rows.map((r) => r[col(s, joint)]);
     const mats = cycles.map(([a, b]) => {
       const seg = interpolateBoth(series.slice(a, b + 1));
       if (seg.length < 2 || seg.every(Number.isNaN)) return phase.map(() => NaN);
@@ -445,7 +479,7 @@ export function perCycleAnalysis(rows, refSide, direction, fps, height, segments
     throw new Error(`${refSide === "left" ? "左" : "右"}足を基準にした歩行周期を検出できませんでした。踵とつま先が見える真横からの動画で、基準足が2回以上接地する区間を含めてください。`);
   }
   const keys = [];
-  for (const s of SIDES) for (const j of ["knee", "hip"]) keys.push([s, j]);
+  for (const s of SIDES) for (const j of JOINTS) keys.push([s, j]);
   const r3 = (x) => round(x, 3), r2 = (x) => (Number.isFinite(x) ? round(x, 2) : null);
   const typeJ = (t) => (t === "heel" ? "踵" : "つま先");
   const list = cycles.map((c, idx) => {
@@ -459,7 +493,7 @@ export function perCycleAnalysis(rows, refSide, direction, fps, height, segments
     for (let i = c.a; i <= c.b; i++) if (rows[i].left_knee_flexion_deg != null || rows[i].right_knee_flexion_deg != null) det++;
     summary.detected_frames_percent = round((100 * det) / (c.b - c.a + 1), 1);
     for (const [s, j] of keys) {
-      const raw = rows.slice(c.a, c.b + 1).map((r) => r[`${s}_${j}_flexion_deg`]);
+      const raw = rows.slice(c.a, c.b + 1).map((r) => r[col(s, j)]);
       const nv = normalize101(raw);
       nv.forEach((v, p) => (norm[p][`${s}_${j}_deg`] = Number.isNaN(v) ? null : v));
       const valid = raw.filter(isNum);
@@ -481,10 +515,11 @@ export function perCycleAnalysis(rows, refSide, direction, fps, height, segments
 
 export const SUMMARY_COLUMNS = (() => {
   const c = ["cycle", "segment", "reference_side", "start_contact", "start_frame", "start_time_seconds", "end_frame", "end_time_seconds", "cycle_duration_seconds", "detected_frames_percent"];
-  for (const s of SIDES) for (const j of ["knee", "hip"]) c.push(`${s}_${j}_max_deg`, `${s}_${j}_min_deg`, `${s}_${j}_range_deg`);
+  c.push("stance_percent", "swing_percent", "stride_length_cm", "step_length_cm", "tla_deg", "tla_timing_percent");
+  for (const s of SIDES) for (const j of JOINTS) c.push(`${s}_${j}_max_deg`, `${s}_${j}_min_deg`, `${s}_${j}_range_deg`);
   return c;
 })();
-export const NORM_COLUMNS = ["cycle", "segment", "gait_cycle_percent", "left_knee_deg", "left_hip_deg", "right_knee_deg", "right_hip_deg"];
+export const NORM_COLUMNS = ["cycle", "segment", "gait_cycle_percent", ...SIDES.flatMap((s) => JOINTS.map((j) => `${s}_${j}_deg`))];
 
 export function perCycleNote(refSide) {
   return `${refSide === "left" ? "左" : "右"}足を基準足とし、基準足が対側足より前にある区間で最も前に出た時点の踵とつま先の高さを比較。踵が低ければ踵、つま先が低ければつま先の上下座標が最下点（画像の高さの${LOWEST_TOLERANCE_RATIO * 100}%以内）に最初に達したフレームを周期の開始とし、次の開始までを1周期（0〜100%）とした。座標は移動平均で平滑化。`;
@@ -494,7 +529,7 @@ export function perCycleNote(refSide) {
 export function meanOfNorms(norms) {
   return Array.from({ length: 101 }, (_, p) => {
     const o = { gait_cycle_percent: p };
-    for (const s of SIDES) for (const j of ["knee", "hip"]) {
+    for (const s of SIDES) for (const j of JOINTS) {
       const vals = norms.map((n) => n[p][`${s}_${j}_deg`]).filter(isNum);
       o[`${s}_${j}_mean_deg`] = vals.length ? vals.reduce((x, y) => x + y, 0) / vals.length : null;
     }
@@ -592,3 +627,132 @@ export function detectLightEvents(vals, fps, f0 = 0) {
 }
 export const LIGHT_COLUMNS = ["event", "onset_frame", "onset_time_seconds", "offset_frame", "offset_time_seconds", "duration_seconds", "peak_brightness"];
 export const LIGHT_NOTE = "指定した範囲の平均輝度（0.299R+0.587G+0.114B、0〜255）をフレームごとに計算。下位10%の値を消灯時の基準、最大値との差を振幅とし、振幅の50%を超えたら点灯と判定（30%を下回ったら消灯）。点灯の開始フレームは、立ち上がりをさかのぼって基準＋max(振幅の15%, 消灯時のばらつき×3)を最初に超えたフレーム。時刻の精度は1フレーム（30fpsで約33ms、60fpsで約17ms）。";
+
+// ---------- 時間距離因子 ----------
+// 換算係数（cm/px）：膝がほぼ伸びた（屈曲10°未満）フレームの股関節〜足関節の長さ（px）の中央値を、
+// 入力した転子果長（cm）に対応させる。該当フレームが少なければ長さの上位10%の値を使う。
+export function legScale(rows, legCm) {
+  if (!(legCm > 0)) return null;
+  const straight = [], all = [];
+  for (const r of rows) for (const s of SIDES) {
+    const hx = r[`_${s}_hip_x`], hy = r[`_${s}_hip_y`], ax = r[`_${s}_ankle_x`], ay = r[`_${s}_ankle_y`];
+    if (![hx, hy, ax, ay].every(isNum)) continue;
+    const L = Math.hypot(hx - ax, hy - ay);
+    all.push(L);
+    const k = r[`${s}_knee_flexion_deg`];
+    if (isNum(k) && k < 10) straight.push(L);
+  }
+  if (!all.length) return null;
+  const med = (a) => { const b = a.slice().sort((x, y) => x - y); return b[Math.floor(b.length / 2)]; };
+  let px, method;
+  if (straight.length >= 10) { px = med(straight); method = `膝屈曲10°未満の${straight.length}フレームの中央値`; }
+  else { const b = all.slice().sort((x, y) => x - y); px = b[Math.floor(b.length * 0.9)]; method = "全フレームの上位10%の値（膝が伸びたフレームが少ないため）"; }
+  return { cmPerPx: legCm / px, legPx: round(px, 1), legCm, method };
+}
+
+// つま先離地：その足の周期内で、足先の前方速度（平滑化後）が最も遅い時点（立脚中）以降、
+// 遊脚の最大前方速度の15%を初めて超えたフレームを目安に、平滑化前の座標で
+// 立脚中の足先位置から（画像幅の0.4%以上）前に動き出した最初のフレームとする。
+function toeOff(toeX, rawToe, a, b, dir, w) {
+  const v = [];
+  for (let i = a; i <= b; i++) v.push(((toeX[Math.min(b, i + 1)] - toeX[Math.max(a, i - 1)]) / 2) * dir);
+  const vmax = Math.max(...v);
+  if (!(vmax > 0)) return null;
+  const firstPart = Math.max(1, Math.floor(v.length * 0.7));
+  let m = 0;
+  for (let i = 0; i < firstPart; i++) if (v[i] < v[m]) m = i;
+  let to = null;
+  for (let i = m; i < v.length; i++) if (v[i] > 0.15 * vmax) { to = a + i; break; }
+  if (to == null) return null;
+  const near = [];
+  for (let i = Math.max(a, a + m - 2); i <= Math.min(b, a + m + 2); i++) if (Number.isFinite(rawToe[i])) near.push(rawToe[i]);
+  if (!near.length) return to;
+  near.sort((x, y) => x - y);
+  const plant = near[Math.floor(near.length / 2)], tol = Math.max(2, w * 0.004);
+  for (let i = Math.max(a + m, to - 6); i <= Math.min(b, to + 6); i++) if (Number.isFinite(rawToe[i]) && (rawToe[i] - plant) * dir > tol) return i;
+  return to;
+}
+export function spatioTemporal(rows, segments, fps, height, scale) {
+  const S = (k) => smoothSeries(rows.map((r) => r[k]), fps);
+  const series = {};
+  for (const s of SIDES) series[s] = {
+    heel: S(`_${s}_heel_x`), toe: S(`_${s}_foot_index_x`),
+    rawHeel: interpolateBoth(rows.map((r) => r[`_${s}_heel_x`])), rawToe: interpolateBoth(rows.map((r) => r[`_${s}_foot_index_x`])),
+  };
+  // 接地した足の位置：接地フレームから3フレーム先までの平滑化前の座標の中央値
+  const planted = (arr, f) => {
+    const v = [];
+    for (let i = f; i <= Math.min(arr.length - 1, f + 3); i++) if (Number.isFinite(arr[i])) v.push(arr[i]);
+    if (!v.length) return NaN;
+    v.sort((x, y) => x - y); return v[Math.floor(v.length / 2)];
+  };
+  const W = rows.length && rows[0].image_width_px ? rows[0].image_width_px : 1920;
+  const hipC = smoothSeries(rows.map((r) => {
+    const a = r._left_hip_x, b = r._right_hip_x;
+    return isNum(a) && isNum(b) ? (a + b) / 2 : isNum(a) ? a : isNum(b) ? b : null;
+  }), fps);
+  const cm = (px) => (scale && isNum(px) ? round(px * scale.cmPerPx, 1) : null);
+  const r1 = (x) => (isNum(x) ? round(x, 1) : null), r3 = (x) => (isNum(x) ? round(x, 3) : null);
+  const cycles = [], contacts = { left: [], right: [] }, speeds = [];
+  for (const sg of segments) {
+    const sub = rows.slice(sg.a, sg.b + 1);
+    for (const s of SIDES) {
+      const cs = heelToeContacts(sub, s, sg.dir, fps, height).map((c) => ({ ...c, frame: c.frame + sg.a, segment: sg.label }));
+      contacts[s].push(...cs);
+      const oth = s === "left" ? "right" : "left";
+      for (let k = 0; k < cs.length - 1; k++) {
+        const a = cs[k].frame, b = cs[k + 1].frame, dur = (b - a) / fps;
+        if (dur < 0.5 || dur > 5 || !series[s].toe) continue;
+        const to = toeOff(series[s].toe, series[s].rawToe, a, b, sg.dir, W);
+        const stance = to == null ? null : (100 * (to - a)) / (b - a);
+        const stride = (planted(series[s].rawHeel, b) - planted(series[s].rawHeel, a)) * sg.dir;
+        const step = (planted(series[s].rawHeel, a) - planted(series[oth].rawHeel, a)) * sg.dir;
+        // TLA：立脚期（接地〜つま先離地）の limb angle の最小値（最も後ろ）を正の値で表す
+        const la = rows.slice(a, b + 1).map((r) => r[col(s, "limb")]);
+        const stanceEnd = to == null ? la.length - 1 : Math.max(0, to - a - 1); // つま先離地の直前まで
+        let mi = -1;
+        la.forEach((x, i) => { if (i <= stanceEnd && isNum(x) && (mi < 0 || x < la[mi])) mi = i; });
+        const lmax = la.filter(isNum).length ? Math.max(...la.filter(isNum)) : null;
+        cycles.push({
+          side: s, segment: sg.label, start_contact: cs[k].type === "heel" ? "踵" : "つま先",
+          start_frame: a, start_time_seconds: r3(a / fps), end_frame: b, cycle_time_seconds: r3(dur),
+          toe_off_frame: to, stance_percent: r1(stance), swing_percent: stance == null ? null : r1(100 - stance),
+          stride_length_cm: cm(Number.isFinite(stride) ? stride : null), step_length_cm: cm(Number.isFinite(step) ? step : null),
+          tla_deg: mi >= 0 ? r1(-la[mi]) : null, tla_timing_percent: mi >= 0 ? r1((100 * mi) / (b - a)) : null,
+          max_forward_limb_angle_deg: r1(lmax),
+        });
+      }
+    }
+    // 歩行速度：区間内の最初の接地から最後の接地までの骨盤中心の移動
+    const all = [...contacts.left, ...contacts.right].filter((c) => c.segment === sg.label).map((c) => c.frame);
+    if (hipC && all.length >= 2) {
+      const a = Math.min(...all), b = Math.max(...all);
+      if (b - a >= fps * 0.5) speeds.push({ segment: sg.label, frames: b - a, px: Math.abs(hipC[b] - hipC[a]), dt: (b - a) / fps });
+    }
+  }
+  cycles.sort((x, y) => x.start_frame - y.start_frame || (x.side < y.side ? -1 : 1));
+  const mean = (arr) => { const v = arr.filter(isNum); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; };
+  const per = {};
+  for (const s of SIDES) {
+    const c = cycles.filter((x) => x.side === s);
+    per[s] = {
+      n: c.length, cycle_time_seconds: r3(mean(c.map((x) => x.cycle_time_seconds))), stance_percent: r1(mean(c.map((x) => x.stance_percent))),
+      swing_percent: r1(mean(c.map((x) => x.swing_percent))), stride_length_cm: r1(mean(c.map((x) => x.stride_length_cm))),
+      step_length_cm: r1(mean(c.map((x) => x.step_length_cm))), tla_deg: r1(mean(c.map((x) => x.tla_deg))),
+      tla_timing_percent: r1(mean(c.map((x) => x.tla_timing_percent))),
+    };
+  }
+  const totalPx = speeds.reduce((t, x) => t + x.px, 0), totalT = speeds.reduce((t, x) => t + x.dt, 0);
+  const cyc = mean([per.left.cycle_time_seconds, per.right.cycle_time_seconds]);
+  const summary = {
+    speed_m_per_s: scale && totalT > 0 ? round((totalPx * scale.cmPerPx) / 100 / totalT, 3) : null,
+    speed_px_per_s: totalT > 0 ? round(totalPx / totalT, 1) : null,
+    cadence_steps_per_min: cyc ? r1(120 / cyc) : null,
+    stance_ratio_right_left: per.left.stance_percent && per.right.stance_percent ? round(per.right.stance_percent / per.left.stance_percent, 3) : null,
+    left: per.left, right: per.right,
+    segments: speeds.map((x) => ({ segment: x.segment, speed_m_per_s: scale ? round((x.px * scale.cmPerPx) / 100 / x.dt, 3) : null, seconds: round(x.dt, 2) })),
+  };
+  return { cycles, summary, scale };
+}
+export const ST_COLUMNS = ["side", "segment", "start_contact", "start_frame", "start_time_seconds", "end_frame", "cycle_time_seconds", "toe_off_frame", "stance_percent", "swing_percent", "stride_length_cm", "step_length_cm", "tla_deg", "tla_timing_percent", "max_forward_limb_angle_deg"];
+export const ST_NOTE = "接地：各足について、その足が対側足より前にある区間で最も前に出た時点の踵とつま先の高さを比べ、低いほうの上下座標が最下点に達した最初のフレーム。つま先離地：周期内で足先の前方速度が最も遅い時点以降、遊脚の最大前方速度の15%を超える付近で、立脚中の足先位置から画像幅の0.4%以上前に動き出した最初のフレーム。立脚期割合＝（つま先離地−接地）／周期時間×100。ストライド長＝同じ足の連続する接地間の踵の水平移動量。ステップ長＝その足の接地時の、対側の踵からの水平距離（いずれも接地から3フレームの平滑化前の座標の中央値を使用）。歩行速度＝区間内の最初の接地から最後の接地までの骨盤中心の水平移動量／時間（往復は往路・復路の合計）。ケイデンス＝120／歩行周期（左右平均）。長さはピクセルを、膝屈曲10°未満のフレームの股関節〜足関節の長さ（中央値）と入力した転子果長の比で換算。TLA：立脚期（接地〜つま先離地）の下肢角度（股関節〜足先の線と鉛直線の角度、足先が前で正）の最小値の符号を反転した値。足関節角度：下腿（膝〜足関節）と足部（踵〜足先）のなす角−90°（背屈が正、中間位の個人差は補正していない）。画像の鉛直・水平を基準にしているため、カメラの傾きや進行方向に対する角度で誤差が出る。";
